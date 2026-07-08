@@ -74,7 +74,28 @@ export function activate(context: vscode.ExtensionContext) {
         }),
     );
 
+    registerMcpProvider(context);
     startServer();
+}
+
+// Self-registers the bundled MCP server with editors that support
+// vscode.lm.registerMcpServerDefinitionProvider (stable in VS Code; Cursor does
+// not implement this API as of writing, so Cursor users still need the manual
+// ~/.cursor/mcp.json entry documented in the README — the guard below makes
+// this a silent no-op there rather than an activation error).
+function registerMcpProvider(context: vscode.ExtensionContext) {
+    if (typeof vscode.lm?.registerMcpServerDefinitionProvider !== 'function') { return; }
+    const serverScript = vscode.Uri.joinPath(context.extensionUri, 'out', 'mcp-server.js').fsPath;
+    const version = context.extension.packageJSON.version as string;
+    context.subscriptions.push(
+        vscode.lm.registerMcpServerDefinitionProvider('jarbobo.mcp-servers', {
+            provideMcpServerDefinitions: () => [
+                // process.execPath = the editor's own bundled Node — no dependency
+                // on the user having a compatible `node` on PATH.
+                new vscode.McpStdioServerDefinition('Jarbobo', process.execPath, [serverScript], {}, version),
+            ],
+        }),
+    );
 }
 
 export function deactivate() {

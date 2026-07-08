@@ -59,10 +59,16 @@ npx vsce package --allow-missing-repository
 cursor --install-extension jarbobo-0.1.0.vsix     # or: code --install-extension …
 ```
 
-Register the MCP server with your client(s):
+**Stock VS Code 1.101+**: that's it — the extension self-registers its bundled MCP
+server via `vscode.lm.registerMcpServerDefinitionProvider`, running on the editor's
+own Node (`process.execPath`), so there's nothing else to configure.
+
+**Cursor** doesn't implement that registration API yet ([tracked on the Cursor
+forum](https://forum.cursor.com/t/support-vs-codes-register-mcp-server-definition-provider-api/133031)),
+so register the server by hand:
 
 ```jsonc
-// Cursor: ~/.cursor/mcp.json
+// ~/.cursor/mcp.json
 {
   "mcpServers": {
     "jarbobo": { "command": "node", "args": ["<abs-path>/jarbobo/out/mcp-server.js"] }
@@ -71,7 +77,7 @@ Register the MCP server with your client(s):
 ```
 
 ```bash
-# Claude Code
+# Claude Code — same manual step, any client that lacks the registration API
 claude mcp add --scope user jarbobo node <abs-path>/jarbobo/out/mcp-server.js
 ```
 
