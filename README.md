@@ -46,6 +46,12 @@ Plus the viewer mechanics you'd expect from a real tool:
 - **`draw_class_diagram`** — UML classes: «stereotypes», attributes & methods with `+ - # ~`
   visibility, and honest UML relations — inheritance ▷, implements ⇢▷, composition ◆,
   aggregation ◇, association, dependency ⇢ — with cardinality labels.
+- **`draw_swimlane_diagram`** — cross-functional flows: steps divided into lanes by owner
+  (service, team, thread), horizontal or vertical, with automatic step ordering from the
+  edges; box/diamond/ellipse steps and styled cross-lane edges.
+- **`draw_timeline`** — milestones ◆ and phase spans ▬ on a categorical ordered axis
+  (dates, versions, quarters — anything), with optional labelled tracks: release
+  histories, migration plans, roadmaps, incident timelines.
 - **`list_diagrams`** / **`open_diagram`** — enumerate saved diagrams and re-display any
   version of one (also returns its spec, so the LLM can roll back or build on it).
 

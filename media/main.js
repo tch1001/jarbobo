@@ -322,16 +322,21 @@
         verSel.hidden = true; // legacy (pre-versioning) diagrams
       }
     }
-    if (btnTranspose) { btnTranspose.hidden = d.type === 'sequence'; } // lifelines have no free layout
+    // only graph/class have freely arrangeable coordinates to transpose
+    if (btnTranspose) { btnTranspose.hidden = !(d.type === 'graph' || d.type === 'class'); }
     activeOps = null;
     $('#title').textContent = d.title || '';
-    $('#subtitle').textContent = d.type === 'sequence' ? 'sequence diagram'
-      : d.type === 'class' ? 'class diagram' : 'graph';
+    $('#subtitle').textContent = {
+      graph: 'graph', sequence: 'sequence diagram', class: 'class diagram',
+      swimlane: 'swimlane diagram', timeline: 'timeline',
+    }[d.type] || d.type;
     stage.innerHTML = '';
     try {
       if (d.type === 'graph') { renderGraph(d); }
       else if (d.type === 'sequence') { renderSequence(d); }
       else if (d.type === 'class') { renderClass(d); }
+      else if (d.type === 'swimlane') { renderSwimlane(d); }
+      else if (d.type === 'timeline') { renderTimeline(d); }
       else { stage.textContent = 'Unknown diagram type: ' + d.type; }
     } catch (err) {
       stage.textContent = 'Render error: ' + (err && err.message || err);
@@ -557,6 +562,31 @@
     if (text !== undefined) { el.textContent = text; }
     return el;
   }
+  // word-wrap text to a pixel width (respects explicit \n)
+  function wrapText(text, maxW, font) {
+    const out = [];
+    String(text).split('\n').forEach((para) => {
+      let cur = '';
+      para.split(/\s+/).forEach((w) => {
+        const t = cur ? cur + ' ' + w : w;
+        if (tw(t, font) <= maxW || !cur) { cur = t; } else { out.push(cur); cur = w; }
+      });
+      out.push(cur);
+    });
+    return out.length ? out : [''];
+  }
+
+  // intersection of segment (center of box -> tx,ty) with the box border;
+  // box = {x, y, w, h} with x/y at the CENTER
+  function rectBorderPoint(box, tx, ty) {
+    const dx = tx - box.x, dy = ty - box.y;
+    if (dx === 0 && dy === 0) { return { x: box.x, y: box.y }; }
+    const sx = (box.w / 2) / Math.abs(dx || 1e-9);
+    const sy = (box.h / 2) / Math.abs(dy || 1e-9);
+    const s = Math.min(sx, sy);
+    return { x: box.x + dx * s, y: box.y + dy * s };
+  }
+
   function labelWithBg(svg, x, y, text, opts) {
     opts = opts || {};
     const font = opts.font || SMALL_FONT;
@@ -991,6 +1021,298 @@
 
     lastClassPositions = {};
     classes.forEach((cl) => { lastClassPositions[cl.id] = { x: boxes[cl.id].x, y: boxes[cl.id].y }; });
+
+    stage.appendChild(svg);
+    activeOps = makeSvgViewport(svg);
+  }
+
+  // ================================================================ SWIMLANE
+
+  function renderSwimlane(d) {
+    const horizontal = d.direction !== 'vertical';
+    const lanes = d.lanes || [], nodes = d.nodes || [], edges = d.edges || [];
+    const laneOrder = {};
+    lanes.forEach((l, i) => { laneOrder[l.id] = i; });
+
+    // step order along the flow axis: longest-path layering over the edges
+    const col = {};
+    nodes.forEach((n) => { col[n.id] = 0; });
+    const idSet = new Set(nodes.map((n) => n.id));
+    for (let pass = 0; pass < nodes.length; pass++) {
+      let changed = false;
+      edges.forEach((e) => {
+        if (!idSet.has(e.from) || !idSet.has(e.to)) { return; }
+        if (col[e.to] < col[e.from] + 1 && col[e.from] + 1 < nodes.length) {
+          col[e.to] = col[e.from] + 1;
+          changed = true;
+        }
+      });
+      if (!changed) { break; }
+    }
+    const nCols = nodes.length ? Math.max(...nodes.map((n) => col[n.id])) + 1 : 1;
+
+    // node dimensions (wrapped labels)
+    const dims = {};
+    nodes.forEach((n) => {
+      const lines = wrapText(n.label || n.id, 150, SMALL_FONT);
+      const w = Math.max(90, Math.min(176, lines.reduce((m, ln) => Math.max(m, tw(ln, SMALL_FONT)), 0) + 26));
+      const h = Math.max(40, lines.length * 15 + 18);
+      dims[n.id] = { w, h, lines };
+    });
+
+    // stacking inside each (lane, column) cell
+    const cellCount = {}, rowIdx = {};
+    nodes.forEach((n) => {
+      const key = laneOrder[n.lane] + ':' + col[n.id];
+      rowIdx[n.id] = cellCount[key] = (cellCount[key] || 0);
+      cellCount[key]++;
+    });
+    const laneMetrics = lanes.map((l, li) => {
+      let maxStack = 1, maxH = 40, maxW = 100;
+      nodes.forEach((n) => {
+        if (laneOrder[n.lane] !== li) { return; }
+        maxStack = Math.max(maxStack, cellCount[li + ':' + col[n.id]]);
+        maxH = Math.max(maxH, dims[n.id].h);
+        maxW = Math.max(maxW, dims[n.id].w);
+      });
+      return horizontal
+        ? { slot: maxH + 16, band: Math.max(84, maxStack * (maxH + 16) + 20) }
+        : { slot: maxW + 16, band: Math.max(140, maxStack * (maxW + 16) + 24) };
+    });
+    const laneOffset = [];
+    let acc = 0;
+    laneMetrics.forEach((m) => { laneOffset.push(acc); acc += m.band; });
+    const totalBand = acc;
+
+    const HEADER = horizontal ? 118 : 40;
+    const colStep = horizontal
+      ? Math.max(...nodes.map((n) => dims[n.id].w), 100) + 64
+      : Math.max(...nodes.map((n) => dims[n.id].h), 44) + 56;
+    const flowLen = HEADER + 20 + nCols * colStep + 16;
+
+    const width = horizontal ? flowLen : totalBand;
+    const height = horizontal ? totalBand : flowLen;
+    const svg = svgEl('svg', { width, height, viewBox: `0 0 ${width} ${height}` });
+
+    const defs = svgEl('defs', {});
+    const mk = svgEl('marker', {
+      id: 'swArr', viewBox: '0 0 10 10', refX: 9, refY: 5,
+      markerWidth: 8.5, markerHeight: 8.5, orient: 'auto-start-reverse',
+    });
+    mk.appendChild(svgEl('path', { d: 'M0 0 L10 5 L0 10 z', fill: FG }));
+    defs.appendChild(mk);
+    svg.appendChild(defs);
+
+    // lane bands + headers
+    lanes.forEach((l, li) => {
+      const color = l.color || MUTED;
+      const g = svgEl('g', {});
+      const bandRect = horizontal
+        ? { x: 0, y: laneOffset[li], width, height: laneMetrics[li].band }
+        : { x: laneOffset[li], y: 0, width: laneMetrics[li].band, height };
+      g.appendChild(svgEl('rect', {
+        ...bandRect, fill: color, 'fill-opacity': li % 2 ? 0.04 : 0.08,
+        stroke: color, 'stroke-opacity': 0.35, 'stroke-width': 1,
+      }));
+      const label = l.label || l.id;
+      const lines = wrapText(label, horizontal ? HEADER - 18 : laneMetrics[li].band - 18, UI_FONT_BOLD);
+      const lx = horizontal ? 12 : laneOffset[li] + laneMetrics[li].band / 2;
+      const ly0 = horizontal
+        ? laneOffset[li] + laneMetrics[li].band / 2 - (lines.length - 1) * 7.5
+        : 18;
+      lines.forEach((ln, i) => {
+        g.appendChild(svgEl('text', {
+          x: lx, y: ly0 + i * 15 + 4, fill: FG, 'font-size': 12.5, 'font-weight': 600,
+          'text-anchor': horizontal ? 'start' : 'middle',
+          'font-family': "-apple-system, sans-serif",
+        }, ln));
+      });
+      if (horizontal) {
+        g.appendChild(svgEl('line', { x1: HEADER, y1: laneOffset[li], x2: HEADER, y2: laneOffset[li] + laneMetrics[li].band, stroke: color, 'stroke-opacity': 0.35 }));
+      } else {
+        g.appendChild(svgEl('line', { x1: laneOffset[li], y1: HEADER, x2: laneOffset[li] + laneMetrics[li].band, y2: HEADER, stroke: color, 'stroke-opacity': 0.35 }));
+      }
+      bindSvgItem(g, l, label, 'lane');
+      svg.appendChild(g);
+    });
+
+    // node center rects
+    const rect = {};
+    nodes.forEach((n) => {
+      const li = laneOrder[n.lane];
+      if (li === undefined) { return; }
+      const m = laneMetrics[li];
+      const used = cellCount[li + ':' + col[n.id]] * m.slot;
+      const stackStart = laneOffset[li] + (m.band - used) / 2 + m.slot / 2;
+      const flowPos = HEADER + 20 + col[n.id] * colStep + colStep / 2;
+      const lanePos = stackStart + rowIdx[n.id] * m.slot;
+      rect[n.id] = horizontal
+        ? { x: flowPos, y: lanePos, w: dims[n.id].w, h: dims[n.id].h }
+        : { x: lanePos, y: flowPos, w: dims[n.id].w, h: dims[n.id].h };
+    });
+
+    // edges under nodes
+    edges.forEach((e) => {
+      const A = rect[e.from], B = rect[e.to];
+      if (!A || !B) { return; }
+      const p1 = rectBorderPoint(A, B.x, B.y);
+      const p2 = rectBorderPoint(B, A.x, A.y);
+      const g = svgEl('g', {});
+      g.appendChild(svgEl('line', {
+        x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y,
+        stroke: e.color || FG, 'stroke-width': 1.4,
+        'stroke-dasharray': e.style === 'dashed' ? '6 4' : e.style === 'dotted' ? '2 3' : undefined,
+        'marker-end': 'url(#swArr)',
+      }));
+      g.appendChild(svgEl('line', { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, stroke: 'transparent', 'stroke-width': 12 }));
+      if (e.label) { labelWithBg(svg, (p1.x + p2.x) / 2, (p1.y + p2.y) / 2 - 5, e.label, { size: 11 }); }
+      bindSvgItem(g, e, e.label || `${e.from} → ${e.to}`, 'edge');
+      svg.appendChild(g);
+    });
+
+    // nodes
+    nodes.forEach((n) => {
+      const r = rect[n.id];
+      if (!r) { return; }
+      const color = n.color || ACCENT;
+      const g = svgEl('g', {});
+      if (n.shape === 'diamond') {
+        const w2 = r.w / 2 + 14, h2 = r.h / 2 + 10;
+        g.appendChild(svgEl('path', {
+          d: `M${r.x} ${r.y - h2} L${r.x + w2} ${r.y} L${r.x} ${r.y + h2} L${r.x - w2} ${r.y} z`,
+          fill: color, 'fill-opacity': 0.16, stroke: color, 'stroke-width': 1.4,
+        }));
+      } else if (n.shape === 'ellipse') {
+        g.appendChild(svgEl('ellipse', {
+          cx: r.x, cy: r.y, rx: r.w / 2 + 8, ry: r.h / 2 + 4,
+          fill: color, 'fill-opacity': 0.16, stroke: color, 'stroke-width': 1.4,
+        }));
+      } else {
+        g.appendChild(svgEl('rect', {
+          x: r.x - r.w / 2, y: r.y - r.h / 2, width: r.w, height: r.h, rx: 6,
+          fill: color, 'fill-opacity': 0.16, stroke: color, 'stroke-width': 1.4,
+        }));
+      }
+      const lines = dims[n.id].lines;
+      lines.forEach((ln, i) => {
+        g.appendChild(svgEl('text', {
+          x: r.x, y: r.y - (lines.length - 1) * 7.5 + i * 15 + 4,
+          fill: FG, 'font-size': 12, 'text-anchor': 'middle',
+          'font-family': "-apple-system, sans-serif",
+        }, ln));
+      });
+      bindSvgItem(g, n, n.label || n.id, 'step');
+      svg.appendChild(g);
+    });
+
+    stage.appendChild(svg);
+    activeOps = makeSvgViewport(svg);
+  }
+
+  // ================================================================ TIMELINE
+
+  function renderTimeline(d) {
+    const items = d.items || [];
+    const tracks = (d.tracks && d.tracks.length) ? d.tracks : [{ id: '__default', label: '' }];
+    const trackOf = (it) => it.track || tracks[0].id;
+
+    // categorical axis: explicit order, else first appearance
+    const axis = (d.axisOrder || []).slice();
+    const seen = new Set(axis);
+    items.forEach((it) => {
+      [it.start, it.end].forEach((s) => {
+        if (s && !seen.has(s)) { seen.add(s); axis.push(s); }
+      });
+    });
+
+    const HEADER_W = Math.max(24, ...tracks.map((t) => tw(t.label || (t.id === '__default' ? '' : t.id), UI_FONT_BOLD) + 24));
+    const stepW = Math.max(96, ...axis.map((a) => tw(a, SMALL_FONT) + 36));
+    const axisX = {};
+    axis.forEach((a, i) => { axisX[a] = HEADER_W + 50 + i * stepW; });
+
+    const ROW = 34, TOP = 44;
+    const trackRows = tracks.map((t) => Math.max(1, items.filter((it) => trackOf(it) === t.id).length));
+    const trackOffset = [];
+    let acc = TOP;
+    trackRows.forEach((rows) => { trackOffset.push(acc); acc += rows * ROW + 18; });
+    const height = acc + 16;
+    const width = HEADER_W + 50 + (axis.length ? (axis.length - 1) * stepW : 0) + Math.max(160, stepW);
+
+    const svg = svgEl('svg', { width, height, viewBox: `0 0 ${width} ${height}` });
+
+    // axis header + gridlines
+    axis.forEach((a) => {
+      svg.appendChild(svgEl('line', {
+        x1: axisX[a], y1: TOP - 12, x2: axisX[a], y2: height - 8,
+        stroke: MUTED, 'stroke-width': 1, 'stroke-dasharray': '3 5', 'stroke-opacity': 0.5,
+      }));
+      svg.appendChild(svgEl('text', {
+        x: axisX[a], y: 20, fill: MUTED, 'font-size': 11.5, 'font-weight': 600, 'text-anchor': 'middle',
+        'font-family': "-apple-system, sans-serif",
+      }, a));
+    });
+
+    // track bands + labels
+    tracks.forEach((t, ti) => {
+      const bandH = trackRows[ti] * ROW + 18;
+      const color = t.color || MUTED;
+      const g = svgEl('g', {});
+      g.appendChild(svgEl('rect', {
+        x: 0, y: trackOffset[ti] - 9, width, height: bandH,
+        fill: color, 'fill-opacity': ti % 2 ? 0.03 : 0.06,
+      }));
+      const label = t.label || (t.id === '__default' ? '' : t.id);
+      if (label) {
+        g.appendChild(svgEl('text', {
+          x: 12, y: trackOffset[ti] + bandH / 2 - 4, fill: FG, 'font-size': 12.5, 'font-weight': 600,
+          'font-family': "-apple-system, sans-serif",
+        }, label));
+      }
+      bindSvgItem(g, t, label, 'track');
+      svg.appendChild(g);
+    });
+
+    // items: sub-row per item within its track, in array order
+    const subRow = {};
+    tracks.forEach((t) => { subRow[t.id] = 0; });
+    items.forEach((it) => {
+      const ti = tracks.findIndex((t) => t.id === trackOf(it));
+      if (ti < 0 || axisX[it.start] === undefined) { return; }
+      const y = trackOffset[ti] + subRow[trackOf(it)] * ROW + ROW / 2;
+      subRow[trackOf(it)]++;
+      const color = it.color || (tracks[ti].color || ACCENT);
+      const g = svgEl('g', {});
+      if (it.end && axisX[it.end] !== undefined && it.end !== it.start) {
+        const x1 = axisX[it.start], x2 = axisX[it.end];
+        g.appendChild(svgEl('rect', {
+          x: Math.min(x1, x2), y: y - 9, width: Math.abs(x2 - x1), height: 18, rx: 9,
+          fill: color, 'fill-opacity': 0.3, stroke: color, 'stroke-width': 1.2,
+        }));
+        const mid = (x1 + x2) / 2;
+        if (tw(it.label, SMALL_FONT) + 14 < Math.abs(x2 - x1)) {
+          g.appendChild(svgEl('text', {
+            x: mid, y: y + 4, fill: FG, 'font-size': 11.5, 'text-anchor': 'middle',
+            'font-family': "-apple-system, sans-serif",
+          }, it.label));
+        } else {
+          labelWithBg(svg, Math.max(x1, x2) + 8, y + 4, it.label, { anchor: 'start', size: 11.5 });
+        }
+      } else {
+        g.appendChild(svgEl('path', {
+          d: `M${axisX[it.start]} ${y - 9} L${axisX[it.start] + 8} ${y} L${axisX[it.start]} ${y + 9} L${axisX[it.start] - 8} ${y} z`,
+          fill: color, stroke: color, 'fill-opacity': 0.55, 'stroke-width': 1.2,
+        }));
+        labelWithBg(svg, axisX[it.start] + 13, y + 4, it.label, { anchor: 'start', size: 11.5 });
+      }
+      // generous hit area
+      g.appendChild(svgEl('rect', {
+        x: axisX[it.start] - 12, y: y - 13,
+        width: (it.end && axisX[it.end] !== undefined ? Math.abs(axisX[it.end] - axisX[it.start]) : 0) + tw(it.label, SMALL_FONT) + 40,
+        height: 26, fill: 'transparent',
+      }));
+      bindSvgItem(g, it, it.label, it.end ? 'span' : 'milestone');
+      svg.appendChild(g);
+    });
 
     stage.appendChild(svg);
     activeOps = makeSvgViewport(svg);

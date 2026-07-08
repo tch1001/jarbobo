@@ -46,6 +46,8 @@
   <button onclick="show('graph')">graph</button>
   <button onclick="show('sequence')">sequence</button>
   <button onclick="show('class')">class</button>
+  <button onclick="show('swimlane')">swimlane</button>
+  <button onclick="show('timeline')">timeline</button>
 </div>
 <script src="vendor/dagre.min.js"></script>
 <script src="vendor/cytoscape.min.js"></script>
@@ -123,6 +125,52 @@ const samples = {
       { from: 'cpp_function', to: 'internals', kind: 'dependency', label: 'registers into' }
     ]
   }
+};
+samples.swimlane = {
+  type: 'swimlane',
+  title: 'jarbobo draw call — who does what',
+  direction: 'horizontal',
+  lanes: [
+    { id: 'llm', label: 'LLM (MCP client)', color: '#c586c0' },
+    { id: 'server', label: 'mcp-server.js', color: '#dcdcaa', tooltip: 'stdio child process' },
+    { id: 'ext', label: 'extension host', color: '#569cd6' }
+  ],
+  nodes: [
+    { id: 'call', label: 'draw_graph(spec)', lane: 'llm', shape: 'ellipse', tooltip: 'tool call over stdio' },
+    { id: 'validate', label: 'zod validation', lane: 'server', tooltip: 'unknown ids fail loudly' },
+    { id: 'valid', label: 'valid?', lane: 'server', shape: 'diamond' },
+    { id: 'save', label: 'save v<N>.json', lane: 'server' },
+    { id: 'post', label: 'POST /diagram', lane: 'server' },
+    { id: 'err', label: 'isError result', lane: 'llm', color: '#f48771' },
+    { id: 'panel', label: 'update / create tab', lane: 'ext' },
+    { id: 'render', label: 'webview renders', lane: 'ext', shape: 'ellipse', color: '#4ec9b0' }
+  ],
+  edges: [
+    { from: 'call', to: 'validate' },
+    { from: 'validate', to: 'valid' },
+    { from: 'valid', to: 'err', label: 'no', style: 'dashed', color: '#f48771' },
+    { from: 'valid', to: 'save', label: 'yes' },
+    { from: 'save', to: 'post' },
+    { from: 'post', to: 'panel' },
+    { from: 'panel', to: 'render' }
+  ]
+};
+samples.timeline = {
+  type: 'timeline',
+  title: 'pybind11 — the vectorcall story',
+  tracks: [
+    { id: 'py', label: 'CPython', color: '#569cd6' },
+    { id: 'pyb', label: 'pybind11', color: '#4ec9b0' },
+    { id: 'nb', label: 'nanobind', color: '#c586c0' }
+  ],
+  items: [
+    { id: 'pep590', label: 'PEP 590 vectorcall', start: '2019', track: 'py', tooltip: 'fast calling protocol lands in 3.8' },
+    { id: 'legacy', label: 'METH_VARARGS era (tuple per call)', start: '2015', end: '2026', track: 'pyb' },
+    { id: 'v3', label: 'v3.0 ABI bump', start: '2025', track: 'pyb' },
+    { id: 'fastcall', label: 'METH_FASTCALL adopted', start: '2026', track: 'pyb', color: '#dcdcaa' },
+    { id: 'nb1', label: 'vectorcall from day one', start: '2022', end: '2026', track: 'nb' }
+  ],
+  axisOrder: ['2015', '2019', '2022', '2025', '2026']
 };
 function show(t) { window.postMessage({ type: 'render', diagram: samples[t] }, '*'); }
 addEventListener('load', () => {

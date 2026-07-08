@@ -350,6 +350,121 @@ server.registerTool(
     },
 );
 
+// ---------------------------------------------------------------- draw_swimlane_diagram
+
+server.registerTool(
+    'draw_swimlane_diagram',
+    {
+        title: 'Draw or edit a swimlane diagram',
+        description:
+            'Render an interactive swimlane (cross-functional flow) diagram in the editor: a process whose steps are divided into lanes by owner — services, teams, processes, threads, request/worker boundaries. Best when WHO does each step matters as much as the order. ' +
+            'Pass `id` to EDIT an existing swimlane diagram (next version, same tab); omit it to create a new one. ' +
+            'Lanes render in array order as parallel bands ("horizontal" default: lanes are rows, flow runs left→right; "vertical": lanes are columns, flow runs top→bottom). Every node names its lane; step order is computed automatically from the edges (topological layering). ' +
+            'Node shapes: "box" (step, default), "diamond" (decision), "ellipse" (start/end). Edges support labels, solid/dashed/dotted styles and colors; cross-lane edges are the whole point — use them freely. ' +
+            'Interactivity: lanes, nodes and edges all accept `tooltip`, `detail`, `file`+`line`, `href` — link each step to the code that implements it and explain its role.',
+        inputSchema: {
+            ...idProp,
+            title: z.string().describe('Diagram title shown in the panel header.'),
+            direction: z.enum(['horizontal', 'vertical']).optional().describe('"horizontal" (default): lanes are rows, flow left→right. "vertical": lanes are columns, flow top→bottom.'),
+            lanes: z.array(z.object({
+                id: z.string(),
+                label: z.string().optional().describe('Defaults to id.'),
+                color: z.string().optional().describe('Hex tint for the lane band.'),
+                ...interactiveProps,
+            })).min(1).describe('Rendered in array order.'),
+            nodes: z.array(z.object({
+                id: z.string(),
+                label: z.string().optional().describe('Defaults to id. Keep short; put prose in tooltip/detail.'),
+                lane: z.string().describe('id of the lane this step belongs to.'),
+                shape: z.enum(['box', 'diamond', 'ellipse']).optional().describe('box = step (default), diamond = decision, ellipse = start/end.'),
+                color: z.string().optional(),
+                ...interactiveProps,
+            })).min(1),
+            edges: z.array(z.object({
+                from: z.string(),
+                to: z.string(),
+                label: z.string().optional(),
+                style: z.enum(['solid', 'dashed', 'dotted']).optional(),
+                color: z.string().optional(),
+                ...interactiveProps,
+            })).optional(),
+        },
+    },
+    async (args) => {
+        const { id, baseVersion, ...spec } = args;
+        const laneIds = new Set(spec.lanes.map(l => l.id));
+        const nodeIds = new Set(spec.nodes.map(n => n.id));
+        const problems: string[] = [];
+        for (const n of spec.nodes) {
+            if (!laneIds.has(n.lane)) { problems.push(`node "${n.id}" references unknown lane "${n.lane}"`); }
+        }
+        for (const e of spec.edges ?? []) {
+            if (!nodeIds.has(e.from)) { problems.push(`edge references unknown node id "${e.from}"`); }
+            if (!nodeIds.has(e.to)) { problems.push(`edge references unknown node id "${e.to}"`); }
+        }
+        if (problems.length) { return fail(problems); }
+        try {
+            const d = await deliver({ type: 'swimlane', ...spec }, id, baseVersion);
+            return ok('swimlane diagram', spec.title, `${spec.lanes.length} lanes, ${spec.nodes.length} steps, ${(spec.edges ?? []).length} edges`, d);
+        } catch (e) {
+            return fail([String((e as Error).message)]);
+        }
+    },
+);
+
+// ---------------------------------------------------------------- draw_timeline
+
+server.registerTool(
+    'draw_timeline',
+    {
+        title: 'Draw or edit a timeline / roadmap',
+        description:
+            'Render an interactive timeline in the editor: milestones and phase spans laid along an ordered axis — release histories, migration plans, project roadmaps, deprecation schedules, incident timelines. ' +
+            'Pass `id` to EDIT an existing timeline (next version, same tab); omit it to create a new one. ' +
+            'The axis is CATEGORICAL: `start`/`end` are ordered labels, not parsed dates — "2024-01", "v2.0", "Q3", "phase 1" all work. Axis order = order of first appearance across items, or set `axisOrder` explicitly. ' +
+            'An item with only `start` renders as a milestone (diamond); with `start`+`end` it renders as a span bar. Optional `tracks` group items into labelled rows (e.g. one per workstream/component). ' +
+            'Interactivity: tracks and items accept `tooltip`, `detail`, `file`+`line`, `href` — link releases to changelogs/commits and explain each phase.',
+        inputSchema: {
+            ...idProp,
+            title: z.string().describe('Diagram title shown in the panel header.'),
+            tracks: z.array(z.object({
+                id: z.string(),
+                label: z.string().optional().describe('Defaults to id.'),
+                color: z.string().optional(),
+                ...interactiveProps,
+            })).optional().describe('Optional labelled rows, in array order. If provided, every item must reference one.'),
+            items: z.array(z.object({
+                id: z.string(),
+                label: z.string().describe('Shown on/next to the milestone or span.'),
+                start: z.string().describe('Axis label where this item starts (or sits, for milestones).'),
+                end: z.string().optional().describe('Axis label where the span ends. Omit for a milestone.'),
+                track: z.string().optional().describe('id of the track this item belongs to (required if tracks are defined).'),
+                color: z.string().optional(),
+                ...interactiveProps,
+            })).min(1),
+            axisOrder: z.array(z.string()).optional().describe('Explicit left-to-right order of axis labels. Defaults to order of first appearance.'),
+        },
+    },
+    async (args) => {
+        const { id, baseVersion, ...spec } = args;
+        const problems: string[] = [];
+        if (spec.tracks?.length) {
+            const trackIds = new Set(spec.tracks.map(t => t.id));
+            for (const it of spec.items) {
+                if (!it.track) { problems.push(`item "${it.id}" needs a track (tracks are defined)`); }
+                else if (!trackIds.has(it.track)) { problems.push(`item "${it.id}" references unknown track "${it.track}"`); }
+            }
+        }
+        if (problems.length) { return fail(problems); }
+        try {
+            const d = await deliver({ type: 'timeline', ...spec }, id, baseVersion);
+            return ok('timeline', spec.title, `${spec.items.length} items${spec.tracks?.length ? `, ${spec.tracks.length} tracks` : ''}`, d);
+        } catch (e) {
+            return fail([String((e as Error).message)]);
+        }
+    },
+);
+
 // ---------------------------------------------------------------- list_diagrams
 
 server.registerTool(
