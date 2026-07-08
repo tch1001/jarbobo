@@ -1,77 +1,117 @@
-# jarbobo
+# Tired of badly formatted markdown? Give your LLM a canvas. 🎨
 
-Interactive diagrams drawn by LLMs, rendered inside Cursor/VS Code — every element
-hoverable and clickable, with click-through to source `file:line`.
+**jarbobo** lets Claude (or any MCP client) draw **real, interactive diagrams inside your editor** —
+not ASCII art, not a mermaid string it hallucinated half the syntax for, not a PNG in another tab.
 
-## How it works
+Graphs, UML sequence diagrams, and class diagrams that live in Cursor as first-class tabs, where
+**every node is a live pointer into your code**: hover it for the gist, click it and your editor
+jumps to the exact `file:line`.
 
-```
-Claude (Cursor agent)
-   │  MCP tool call (draw_graph / draw_sequence_diagram / draw_class_diagram)
-   ▼
-out/mcp-server.js          (stdio MCP server, spawned by Cursor)
-   │  saves JSON to ~/.jarbobo/diagrams/
-   │  POST http://127.0.0.1:<port>/diagram    (port from ~/.jarbobo/port.json)
-   ▼
-extension (this repo)      (HTTP listener started on Cursor startup)
-   ▼
-webview panel              (cytoscape for graphs, custom SVG for sequence/UML)
-   │  click on node with file+line
-   ▼
-editor jumps to source
-```
+![jarbobo demo — LLM-drawn diagram on the left, click a node, the editor jumps to the source line on the right](assets/demo.gif)
 
-## Install
+*Above: exploring pybind11's internals. The diagram was drawn by Claude via MCP; clicking
+`struct internals` focuses `internals.h:302` in the editor.*
+
+---
+
+## Why this exists
+
+LLMs are great at *explaining* systems and terrible at *showing* them. Markdown gives them bullet
+points; mermaid gives them a syntax to typo. jarbobo gives them a canvas with an interactivity
+contract:
+
+| The LLM sets… | You get… |
+|---|---|
+| `tooltip` | hover text on any node, edge, message, or class |
+| `detail` | click → side panel with the full explanation (lockable 🔒, click-outside to close) |
+| `file` + `line` | **click → your editor opens that source line** |
+| `href` | click → docs / PR / dashboard |
+
+Plus the viewer mechanics you'd expect from a real tool:
+
+- 🗂 **one tab per diagram** — compare views side by side, tear a tab out into its own window
+- 🔍 **pan & zoom** — right-drag pans, scroll pans, ⇧-scroll pans horizontally, ⌘-scroll zooms
+- 🧲 **persistent layouts** — drag nodes around; the arrangement survives close & reopen
+- 🎯 **ref-target toggle** — open clicked references in the main code window or next to the diagram
+- 📊 **status bar** — `jarbobo: idle` / `jarbobo: 3 diagrams`, click for history
+
+## The three tools
+
+- **`draw_graph`** — architecture, dataflow, call graphs, state machines. Layered/force/grid/circle
+  layouts, shapes (box, ellipse, diamond, hexagon, cylinder), labelled group containers for
+  boundaries ("CPython interpreter" vs "your .so"), styled edges (solid/dashed/dotted, colors).
+- **`draw_sequence_diagram`** — UML sequence: box/actor/database participants, sync/async/reply/self
+  messages with automatic activation bars, side notes, and `loop / alt / opt / par` frames.
+- **`draw_class_diagram`** — UML classes: «stereotypes», attributes & methods with `+ - # ~`
+  visibility, and honest UML relations — inheritance ▷, implements ⇢▷, composition ◆,
+  aggregation ◇, association, dependency ⇢ — with cardinality labels.
+
+Validation is strict (unknown node ids, bad frame ranges → the tool call fails with a fixable
+message), so the LLM can't silently draw a broken picture.
+
+## Quick start
 
 ```bash
-# build
+git clone git@github.com:tch1001/jarbobo.git && cd jarbobo
 npm install && npm run compile && npm run vendor
-# package + install into Cursor
 npx vsce package --allow-missing-repository
-cursor --install-extension jarbobo-0.1.0.vsix
+cursor --install-extension jarbobo-0.1.0.vsix     # or: code --install-extension …
 ```
 
-MCP registration (`~/.cursor/mcp.json`):
+Register the MCP server with your client(s):
 
-```json
+```jsonc
+// Cursor: ~/.cursor/mcp.json
 {
   "mcpServers": {
-    "jarbobo": {
-      "command": "/Users/fish/.nvm/versions/node/v22.12.0/bin/node",
-      "args": ["/Users/fish/jarbobo/out/mcp-server.js"]
-    }
+    "jarbobo": { "command": "node", "args": ["<abs-path>/jarbobo/out/mcp-server.js"] }
   }
 }
 ```
 
-Reload Cursor after installing. The extension starts its HTTP bridge on startup;
-the panel opens automatically on the first draw call.
+```bash
+# Claude Code
+claude mcp add --scope user jarbobo node <abs-path>/jarbobo/out/mcp-server.js
+```
 
-## Tools exposed to the LLM
+Reload the editor once, then ask your agent something like
+*“draw a sequence diagram of what happens on import, and link every step to the source.”*
 
-- **draw_graph** — node-edge graphs (architecture, flow, dependencies, state machines).
-  Layouts: layered/force/grid/circle. Shapes: box, ellipse, diamond, hexagon, cylinder.
-  Groups render as labelled containers. Edge styles: solid/dashed/dotted; arrowheads
-  triangle/open/none; colors.
-- **draw_sequence_diagram** — UML sequence: participants (box/actor/database), messages
-  (sync/async/reply/self) with automatic activation bars, notes, and loop/alt/opt/par frames.
-- **draw_class_diagram** — UML class boxes («stereotype», attributes, methods with +/-/#/~
-  visibility) and relations: inheritance, implements, composition, aggregation, association,
-  dependency, with cardinality labels.
+## Architecture
 
-**Interactivity contract (every element):** `tooltip` → hover text; `detail` → click opens a
-side panel; `file` + `line` → click jumps to source in the editor; `href` → click opens a URL.
+Two processes, one localhost bridge — so **any number of MCP clients draw into the same editor**:
 
-## Panel controls
+```
+Claude (Cursor agent / Claude Code / …)
+   │  stdio MCP: draw_graph / draw_sequence_diagram / draw_class_diagram
+   ▼
+mcp-server.js        validates (zod) → saves ~/.jarbobo/diagrams/*.json
+   │  POST /diagram  (port discovered via ~/.jarbobo/port.json)
+   ▼
+extension host       one webview tab per diagram · status bar · persists layouts
+   ▼
+webview              cytoscape (graphs) · hand-rolled SVG (sequence / UML)
+   │  click node with file:line
+   ▼
+your editor          reveals the line, respecting locked editor groups
+```
 
-- **right-drag** — pan
-- **scroll** — vertical pan · **shift+scroll** — horizontal pan · **cmd+scroll** — zoom (around cursor)
-- **Esc** — close detail panel
-- Commands: `Jarbobo: Open Diagram Panel`, `Jarbobo: Open Recent Diagram` (history lives in `~/.jarbobo/diagrams/`)
+## Panel cheat-sheet
+
+| Action | How |
+|---|---|
+| pan | right-drag, or scroll / ⇧-scroll |
+| zoom | ⌘-scroll (around cursor) |
+| reset pan/zoom | **reset view** button |
+| recompute layout (discard drags) | **reset layout** button |
+| pin the detail panel | 🔓 → 🔒 next to ✕ |
+| choose where refs open | **refs → code window / this window** toggle |
+| reopen anything | status bar item, or `Jarbobo: Open Recent Diagram` |
 
 ## Dev
 
-`media/dev.html` is a standalone harness (serve `media/` over HTTP and open
-`dev.html#graph|sequence|class`). `node scripts/test-mcp.mjs` smoke-tests the MCP
-server end-to-end. `~/.jarbobo/port.json` + `curl 127.0.0.1:<port>/health` to check
-the extension bridge.
+`media/dev.html` is a standalone harness (serve `media/` and open `dev.html#graph|sequence|class`).
+`node scripts/test-mcp.mjs` smoke-tests the MCP server over stdio.
+`curl 127.0.0.1:$(jq .port ~/.jarbobo/port.json)/health` checks the bridge.
+
+MIT.
