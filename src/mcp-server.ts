@@ -32,6 +32,7 @@ const interactiveProps = {
 
 const idProp = {
     id: z.string().optional().describe('To EDIT an existing diagram: pass its id (returned when it was created, or found via list_diagrams). The new content is saved as the next version and the diagram\'s existing tab updates in place — no new tab. The user\'s hand-arranged element positions carry forward automatically, keyed by element id — keep ids stable across edits. Omit to create a new diagram in a new tab. Users asking for edits mean the LATEST version unless they name one.'),
+    baseVersion: z.number().int().optional().describe('Only with `id`: carry the hand-arranged layout from THIS version instead of the latest one. Use when the user asks to edit starting from an older version (e.g. "go back to v6 and add X" → open_diagram(id, 6) for the content, then resubmit with baseVersion: 6). Content always comes from the spec you submit; baseVersion only selects which version\'s arrangement is inherited.'),
 };
 
 // ---------------------------------------------------------------- storage
@@ -86,7 +87,7 @@ function withMeta(diagram: Record<string, unknown>, id: string, version: number)
     return { ...diagram, _id: id, _version: version, _versions: listVersions(id), _file: path.join(lineageDir(id), `v${version}.json`) };
 }
 
-async function deliver(diagram: Record<string, unknown>, editId?: string): Promise<Delivery> {
+async function deliver(diagram: Record<string, unknown>, editId?: string, baseVersion?: number): Promise<Delivery> {
     let id: string;
     let version: number;
     if (editId) {
@@ -104,8 +105,13 @@ async function deliver(diagram: Record<string, unknown>, editId?: string): Promi
         // they drag nodes) carry forward to the edit, keyed by element id —
         // this is why edits must keep ids stable. Positions for ids that no
         // longer exist are dropped; brand-new elements get placed by the
-        // renderer near their connected neighbors.
-        const prevLayout = latest._layout as Record<string, unknown> | undefined;
+        // renderer near their connected neighbors. baseVersion selects WHICH
+        // version's arrangement to inherit (default: the latest).
+        if (baseVersion !== undefined && !versions.includes(baseVersion)) {
+            throw new Error(`Diagram "${editId}" has no v${baseVersion} — available: ${versions.map(v => 'v' + v).join(', ')}.`);
+        }
+        const layoutSource = baseVersion !== undefined ? readVersion(editId, baseVersion) : latest;
+        const prevLayout = layoutSource._layout as Record<string, unknown> | undefined;
         if (prevLayout) {
             const surviving = new Set(
                 (diagram.type === 'class'
@@ -155,7 +161,7 @@ const server = new McpServer(
         instructions:
             'Jarbobo renders interactive diagrams inside the user\'s editor. ' +
             'A draw call WITHOUT `id` opens a new editor tab and returns the diagram\'s id; a draw call WITH `id` EDITS that diagram — it saves the content as the next version and updates the existing tab in place (the panel has a version picker, so old versions are never lost). ' +
-            'Prefer editing over redrawing: when the user asks to tweak/extend/fix a diagram, pass its id back to the same draw tool with the full updated spec. Users mean the LATEST version unless they explicitly name one; use open_diagram to display an older version (it also returns that version\'s spec, which you can resubmit as an edit to roll back). Use list_diagrams to find ids from earlier sessions. ' +
+            'Prefer editing over redrawing: when the user asks to tweak/extend/fix a diagram, pass its id back to the same draw tool with the full updated spec. Users mean the LATEST version unless they explicitly name one; use open_diagram to display an older version (it also returns that version\'s spec, which you can resubmit as an edit to roll back — pass baseVersion: N as well so that version\'s hand-arranged layout is inherited instead of the latest one\'s). Use list_diagrams to find ids from earlier sessions. ' +
             'LAYOUT PRESERVATION: users often hand-arrange diagrams by dragging, and edits automatically carry that arrangement forward — but it is keyed by element id, so KEEP IDS STABLE across edits (renaming an id loses its position; genuinely new elements are placed near their connected neighbors automatically). Never invent coordinate fields — positions are not part of the tool schema and unknown fields are ignored. ' +
             'Make full use of interactivity instead of cramming text into the picture: keep on-diagram labels short; put one-liners in `tooltip` (hover); put paragraphs in `detail` (click opens a side panel); use `href` for docs/links. ' +
             'CODE REFERENCES: attach `file`+`line` to every element that corresponds to code you have seen, and ALWAYS explain the role of the referenced code in the tooltip or detail — what it is and what it does in this diagram\'s story (e.g. "the exec slot — runs the module body at import", "handler that receives the POST /diagram request"). A bare path with no explanation is not acceptable. ' +
@@ -207,7 +213,7 @@ server.registerTool(
         },
     },
     async (args) => {
-        const { id, ...spec } = args;
+        const { id, baseVersion, ...spec } = args;
         const nodeIds = new Set(spec.nodes.map(n => n.id));
         const groupIds = new Set((spec.groups ?? []).map(g => g.id));
         const problems: string[] = [];
@@ -220,7 +226,7 @@ server.registerTool(
         }
         if (problems.length) { return fail(problems); }
         try {
-            const d = await deliver({ type: 'graph', ...spec }, id);
+            const d = await deliver({ type: 'graph', ...spec }, id, baseVersion);
             return ok('graph', spec.title, `${spec.nodes.length} nodes, ${(spec.edges ?? []).length} edges`, d);
         } catch (e) {
             return fail([String((e as Error).message)]);
@@ -268,7 +274,7 @@ server.registerTool(
         },
     },
     async (args) => {
-        const { id, ...spec } = args;
+        const { id, baseVersion, ...spec } = args;
         const ids = new Set(spec.participants.map(p => p.id));
         const problems: string[] = [];
         spec.messages.forEach((m, i) => {
@@ -282,7 +288,7 @@ server.registerTool(
         }
         if (problems.length) { return fail(problems); }
         try {
-            const d = await deliver({ type: 'sequence', ...spec }, id);
+            const d = await deliver({ type: 'sequence', ...spec }, id, baseVersion);
             return ok('sequence diagram', spec.title, `${spec.participants.length} participants, ${spec.messages.length} messages`, d);
         } catch (e) {
             return fail([String((e as Error).message)]);
@@ -327,7 +333,7 @@ server.registerTool(
         },
     },
     async (args) => {
-        const { id, ...spec } = args;
+        const { id, baseVersion, ...spec } = args;
         const ids = new Set(spec.classes.map(c => c.id));
         const problems: string[] = [];
         for (const r of spec.relations ?? []) {
@@ -336,7 +342,7 @@ server.registerTool(
         }
         if (problems.length) { return fail(problems); }
         try {
-            const d = await deliver({ type: 'class', ...spec }, id);
+            const d = await deliver({ type: 'class', ...spec }, id, baseVersion);
             return ok('class diagram', spec.title, `${spec.classes.length} classes, ${(spec.relations ?? []).length} relations`, d);
         } catch (e) {
             return fail([String((e as Error).message)]);
