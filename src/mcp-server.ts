@@ -38,7 +38,8 @@ async function deliver(diagram: Record<string, unknown>): Promise<Delivery> {
         const r = await fetch(`http://127.0.0.1:${port}/diagram`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(diagram),
+            // _file lets the extension persist user rearrangements back into this diagram's JSON
+            body: JSON.stringify({ ...diagram, _file: file }),
             signal: (AbortSignal as unknown as { timeout(ms: number): AbortSignal }).timeout(3000),
         });
         delivered = r.ok;

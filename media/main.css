@@ -76,5 +76,10 @@ html, body {
   background: transparent; border: 0; color: inherit; opacity: .7; font-size: 13px; cursor: pointer;
 }
 #closeDetail:hover { opacity: 1; }
+#lockDetail {
+  position: absolute; top: 8px; right: 34px;
+  background: transparent; border: 0; color: inherit; opacity: .7; font-size: 12px; cursor: pointer;
+}
+#lockDetail:hover { opacity: 1; }
 svg text { user-select: none; }
 .clickable { cursor: pointer; }

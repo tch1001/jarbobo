@@ -47,7 +47,11 @@
   }
   function hideTip() { tip.style.display = 'none'; }
 
+  let detailLocked = false;
+  let detailOpenedAt = 0;
+
   function openDetail(item, label, kind) {
+    detailOpenedAt = Date.now();
     $('#detailKind').textContent = kind || '';
     $('#detailTitle').textContent = label || '';
     $('#detailBody').textContent = item.detail || item.tooltip || '';
@@ -69,8 +73,36 @@
     detail.hidden = false;
   }
   function closeDetail() { detail.hidden = true; }
-  $('#closeDetail').addEventListener('click', closeDetail);
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDetail(); hideTip(); } });
+  $('#closeDetail').addEventListener('click', closeDetail); // ✕ closes even when locked
+
+  const lockBtn = $('#lockDetail');
+  function updateLockBtn() {
+    if (!lockBtn) { return; }
+    lockBtn.textContent = detailLocked ? '🔒' : '🔓';
+    lockBtn.title = detailLocked
+      ? 'Locked: click-outside and Esc will not close this panel'
+      : 'Unlocked: clicking outside the panel closes it';
+  }
+  if (lockBtn) {
+    lockBtn.addEventListener('click', () => { detailLocked = !detailLocked; updateLockBtn(); });
+    updateLockBtn();
+  }
+
+  // click anywhere outside the detail panel closes it (unless locked)
+  document.addEventListener('mousedown', (e) => {
+    if (detail.hidden || detailLocked) { return; }
+    if (e.button !== 0) { return; }                       // right-drag pan shouldn't close it
+    if (detail.contains(e.target)) { return; }
+    if (Date.now() - detailOpenedAt < 200) { return; }    // ignore the click that opened it
+    closeDetail();
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (!detailLocked) { closeDetail(); }
+      hideTip();
+    }
+  });
 
   // ---------------------------------------------------------------- titlebar buttons
 
@@ -92,7 +124,14 @@
   }
   const btnResetLayout = $('#btnResetLayout');
   if (btnResetLayout) {
-    btnResetLayout.addEventListener('click', () => { if (currentDiagram) { render(currentDiagram); } });
+    btnResetLayout.addEventListener('click', () => {
+      if (!currentDiagram) { return; }
+      if (currentDiagram._layout) {
+        delete currentDiagram._layout; // discard saved rearrangement, recompute + persist
+        vscodeApi.postMessage({ type: 'layout', positions: null });
+      }
+      render(currentDiagram);
+    });
   }
 
   // Hover text: tooltip plus the code reference (file:line) when present.
@@ -239,10 +278,14 @@
     }));
 
     const layoutName = d.layout || 'layered';
-    const layout = layoutName === 'layered'
-      ? { name: 'dagre', rankDir: d.direction || 'TB', nodeSep: 40, rankSep: 65, padding: 24 }
-      : layoutName === 'force' ? { name: 'cose', padding: 24, animate: false }
-      : { name: layoutName, padding: 24 };
+    // a user-saved arrangement (drag & drop) takes precedence over the computed layout
+    const saved = d._layout && (d.nodes || []).every((n) => d._layout[n.id]) ? d._layout : null;
+    const layout = saved
+      ? { name: 'preset', positions: (n) => saved[n.id()], fit: true, padding: 24 }
+      : layoutName === 'layered'
+        ? { name: 'dagre', rankDir: d.direction || 'TB', nodeSep: 40, rankSep: 65, padding: 24 }
+        : layoutName === 'force' ? { name: 'cose', padding: 24, animate: false }
+        : { name: layoutName, padding: 24 };
 
     const cy = cytoscape({
       container: holder,
@@ -324,6 +367,16 @@
     cy.on('tap', 'node, edge', (ev) => {
       const item = ev.target.data('_item');
       interact(item, ev.target.data('label'), ev.target.isNode() ? 'node' : 'edge');
+    });
+
+    // persist the arrangement whenever the user finishes dragging a node
+    cy.on('dragfree', 'node', () => {
+      const positions = {};
+      cy.nodes().forEach((n) => {
+        if (!n.isParent()) { positions[n.id()] = { x: n.position('x'), y: n.position('y') }; }
+      });
+      d._layout = positions;
+      vscodeApi.postMessage({ type: 'layout', positions });
     });
 
     activeOps = {

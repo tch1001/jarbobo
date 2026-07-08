@@ -87,11 +87,23 @@ function createPanel(diagram: unknown, focus: boolean) {
 
 async function onWebviewMessage(
     panel: vscode.WebviewPanel,
-    msg: { type: string; file?: string; line?: number; url?: string; target?: string },
+    msg: { type: string; file?: string; line?: number; url?: string; target?: string; positions?: unknown },
 ) {
     if (msg.type === 'ready') {
         const diagram = panels.get(panel);
         if (diagram) { panel.webview.postMessage({ type: 'render', diagram }); }
+    } else if (msg.type === 'layout') {
+        // user rearranged (or reset) node positions — remember them and persist to disk
+        const diagram = panels.get(panel) as Record<string, unknown> | undefined;
+        if (!diagram) { return; }
+        if (msg.positions) { diagram._layout = msg.positions; } else { delete diagram._layout; }
+        const file = diagram._file as string | undefined;
+        if (file) {
+            try {
+                const { _file, ...clean } = diagram;
+                fs.writeFileSync(file, JSON.stringify(clean, null, 2));
+            } catch { /* best-effort */ }
+        }
     } else if (msg.type === 'open' && msg.file) {
         // target 'here' = the editor group hosting this jarbobo tab (works in floated
         // windows too); 'main' = group one. Either way VS Code's locked-group rules
@@ -136,6 +148,7 @@ function buildHtml(webview: vscode.Webview): string {
 <div id="stage"></div>
 <div id="tooltip"></div>
 <aside id="detail" hidden>
+  <button id="lockDetail"></button>
   <button id="closeDetail">✕</button>
   <div class="kind" id="detailKind"></div>
   <h2 id="detailTitle"></h2>
@@ -152,11 +165,18 @@ function buildHtml(webview: vscode.Webview): string {
 
 // ---------------------------------------------------------------- history
 
+function loadDiagramFile(file: string): unknown {
+    const full = path.join(DIAGRAMS_DIR, file);
+    const d = JSON.parse(fs.readFileSync(full, 'utf8'));
+    d._file = full; // so later layout changes persist back to this file
+    return d;
+}
+
 function loadLatestFromDisk(): unknown | undefined {
     try {
         const files = fs.readdirSync(DIAGRAMS_DIR).filter(f => f.endsWith('.json')).sort().reverse();
         if (!files.length) { return undefined; }
-        return JSON.parse(fs.readFileSync(path.join(DIAGRAMS_DIR, files[0]), 'utf8'));
+        return loadDiagramFile(files[0]);
     } catch {
         return undefined;
     }
@@ -184,7 +204,7 @@ async function openRecent() {
     const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Open a recent Jarbobo diagram (new tab)' });
     if (pick) {
         try {
-            createPanel(JSON.parse(fs.readFileSync(path.join(DIAGRAMS_DIR, pick.file), 'utf8')), true);
+            createPanel(loadDiagramFile(pick.file), true);
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot load diagram: ${e}`);
         }
