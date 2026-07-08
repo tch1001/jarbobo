@@ -996,6 +996,27 @@
     activeOps = makeSvgViewport(svg);
   }
 
+  // ---------------------------------------------------------------- input relay
+  // The webview is an iframe: mouse buttons 4/5 and some keybinding chords
+  // never reach the workbench from here. Relay them so Go Back / Go Forward
+  // work while the diagram has focus.
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 3) {
+      e.preventDefault();
+      vscodeApi.postMessage({ type: 'navigate', direction: 'back' });
+    } else if (e.button === 4) {
+      e.preventDefault();
+      vscodeApi.postMessage({ type: 'navigate', direction: 'forward' });
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    // default macOS chords: ctrl+- = Go Back, ctrl+shift+- = Go Forward
+    if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '-' || e.key === '_')) {
+      e.preventDefault();
+      vscodeApi.postMessage({ type: 'navigate', direction: e.shiftKey ? 'forward' : 'back' });
+    }
+  });
+
   // ---------------------------------------------------------------- ready
 
   // After a window reload the serializer restores the tab; the diagram comes

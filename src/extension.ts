@@ -60,6 +60,27 @@ export function activate(context: vscode.ExtensionContext) {
             openOrUpdatePanel(latest as Record<string, unknown>, true);
         }),
         vscode.commands.registerCommand('jarbobo.openRecent', openRecent),
+        // Smart Cmd+Shift+T: the native "Reopen Closed Editor" cannot restore
+        // webview tabs (extension-owned editors are excluded from the closed-
+        // editor history). This dispatcher restores the jarbobo diagram when
+        // it was the most recently closed tab, and otherwise delegates to the
+        // native command so text-file reopening behaves exactly as before.
+        // (Caveat: tab-close events in auxiliary windows are invisible to the
+        // tabGroups API, so a text tab closed in a floated window may lose a
+        // race against a more recently seen jarbobo closure.)
+        vscode.commands.registerCommand('jarbobo.smartReopen', () => {
+            if (closedStack.length && lastJarboboClosedAt > lastOtherTabClosedAt) {
+                createPanel(closedStack.pop(), false);
+            } else {
+                vscode.commands.executeCommand('workbench.action.reopenClosedEditor');
+            }
+        }),
+        vscode.window.tabGroups.onDidChangeTabs((e) => {
+            for (const tab of e.closed) {
+                const isJarbobo = tab.input instanceof vscode.TabInputWebview && tab.input.viewType.includes('jarbobo');
+                if (!isJarbobo) { lastOtherTabClosedAt = Date.now(); }
+            }
+        }),
         vscode.commands.registerCommand('jarbobo.reopenClosed', () => {
             const d = closedStack.pop();
             if (d) {
@@ -161,6 +182,10 @@ function createPanel(diagram: unknown, focus: boolean) {
 
 // Recently closed diagrams (newest last) — restored by jarbobo.reopenClosed.
 const closedStack: unknown[] = [];
+// Timestamps for the smart Cmd+Shift+T dispatcher: reopen a jarbobo diagram
+// only when it was closed more recently than any other kind of tab.
+let lastJarboboClosedAt = 0;
+let lastOtherTabClosedAt = 0;
 
 function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
     panels.set(panel, diagram);
@@ -170,6 +195,7 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
         if (d) {
             closedStack.push(d);
             if (closedStack.length > 20) { closedStack.shift(); }
+            lastJarboboClosedAt = Date.now();
         }
         updateStatus();
     });
@@ -179,7 +205,7 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
 
 async function onWebviewMessage(
     panel: vscode.WebviewPanel,
-    msg: { type: string; file?: string; line?: number; url?: string; target?: string; positions?: unknown; id?: string; version?: number },
+    msg: { type: string; file?: string; line?: number; url?: string; target?: string; positions?: unknown; id?: string; version?: number; direction?: string },
 ) {
     if (msg.type === 'ready') {
         const diagram = panels.get(panel);
@@ -257,6 +283,12 @@ async function onWebviewMessage(
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot load ${msg.id} v${msg.version}: ${e}`);
         }
+    } else if (msg.type === 'navigate') {
+        // relayed from the webview: iframe input isolation means mouse
+        // buttons 4/5 and some chords never reach the workbench natively
+        vscode.commands.executeCommand(
+            msg.direction === 'forward' ? 'workbench.action.navigateForward' : 'workbench.action.navigateBack',
+        );
     } else if (msg.type === 'openUrl' && msg.url) {
         vscode.env.openExternal(vscode.Uri.parse(msg.url));
     }

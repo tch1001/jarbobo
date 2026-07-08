@@ -33,6 +33,17 @@
       {
         "command": "jarbobo.reopenClosed",
         "title": "Jarbobo: Reopen Closed Diagram"
+      },
+      {
+        "command": "jarbobo.smartReopen",
+        "title": "Jarbobo: Reopen Closed Tab (diagram or editor)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "jarbobo.smartReopen",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t"
       }
     ],
     "mcpServerDefinitionProviders": [
