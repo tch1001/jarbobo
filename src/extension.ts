@@ -16,6 +16,11 @@ let extCtx: vscode.ExtensionContext;
 let statusItem: vscode.StatusBarItem;
 let bridgePort: number | undefined;
 let bridgeState: 'starting' | 'up' | 'down' = 'starting';
+let logChannel: vscode.OutputChannel | undefined;
+
+function log(msg: string) {
+    logChannel?.appendLine(`[${new Date().toISOString()}] ${msg}`);
+}
 
 function updateStatus() {
     if (!statusItem) { return; }
@@ -36,6 +41,9 @@ export function activate(context: vscode.ExtensionContext) {
     extCtx = context;
     fs.mkdirSync(DIAGRAMS_DIR, { recursive: true });
 
+    logChannel = vscode.window.createOutputChannel('Jarbobo');
+    context.subscriptions.push(logChannel);
+
     statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     statusItem.name = 'Jarbobo';
     statusItem.command = 'jarbobo.openRecent';
@@ -49,7 +57,7 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage('Jarbobo: no diagrams yet — ask your agent to draw one.');
                 return;
             }
-            createPanel(latest, true);
+            openOrUpdatePanel(latest as Record<string, unknown>, true);
         }),
         vscode.commands.registerCommand('jarbobo.openRecent', openRecent),
         vscode.commands.registerCommand('jarbobo.reopenClosed', () => {
@@ -171,7 +179,7 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
 
 async function onWebviewMessage(
     panel: vscode.WebviewPanel,
-    msg: { type: string; file?: string; line?: number; url?: string; target?: string; positions?: unknown },
+    msg: { type: string; file?: string; line?: number; url?: string; target?: string; positions?: unknown; id?: string; version?: number },
 ) {
     if (msg.type === 'ready') {
         const diagram = panels.get(panel);
@@ -191,19 +199,20 @@ async function onWebviewMessage(
     } else if (msg.type === 'open' && msg.file) {
         // target 'main' = explicit "take me to the code" — focus it there.
         // target 'here' = editor group hosting THIS tab. If jarbobo is floated
-        // into its own window, `panel.viewColumn` still only resolves within
-        // the main window (extensions can't address auxiliary windows —
-        // github.com/microsoft/vscode/issues/180717), so the file necessarily
-        // opens in the main window either way. What we CAN control is whether
-        // that steals OS focus: for 'here' we deliberately do NOT, so the
-        // floated diagram window you're looking at stays in front; the file
-        // opens in the background for you to switch to when ready. VS Code's
-        // locked-group rules still apply: a locked target group redirects to
-        // an unlocked one.
+        // into its own window, extensions can't open editors there at all
+        // (github.com/microsoft/vscode/issues/180717), so the file necessarily
+        // opens in the main window. Worse, showTextDocument ACTIVATES the main
+        // OS window even with preserveFocus:true — that flag only governs
+        // editor focus inside the workbench, not window activation (verified
+        // bug: github.com/microsoft/vscode/issues/201053). So for 'here' on a
+        // floated panel we open the file, then immediately reveal the panel
+        // with focus to bounce OS focus back to the diagram's window.
+        const floated = panel.viewColumn === undefined; // aux-window panels aren't in the main grid
         const viewColumn = msg.target === 'here'
             ? (panel.viewColumn ?? vscode.ViewColumn.Beside)
             : vscode.ViewColumn.One;
         const preserveFocus = msg.target === 'here';
+        log(`open ref: target=${msg.target} floated=${floated} panel.viewColumn=${String(panel.viewColumn)} -> viewColumn=${viewColumn} preserveFocus=${preserveFocus}`);
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
             const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus });
@@ -212,8 +221,20 @@ async function onWebviewMessage(
                 editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
                 editor.selection = new vscode.Selection(pos, pos);
             }
+            if (msg.target === 'here' && floated) {
+                panel.reveal(undefined, false); // re-activate the floated window
+            }
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot open ${msg.file}: ${e}`);
+        }
+    } else if (msg.type === 'loadVersion' && msg.id && typeof msg.version === 'number') {
+        // user picked a version in the panel's version dropdown
+        try {
+            const d = loadLineageVersion(msg.id, msg.version);
+            panels.set(panel, d);
+            panel.webview.postMessage({ type: 'render', diagram: d });
+        } catch (e) {
+            vscode.window.showErrorMessage(`Jarbobo: cannot load ${msg.id} v${msg.version}: ${e}`);
         }
     } else if (msg.type === 'openUrl' && msg.url) {
         vscode.env.openExternal(vscode.Uri.parse(msg.url));
@@ -234,6 +255,7 @@ function buildHtml(webview: vscode.Webview): string {
 <div id="titlebar">
   <span id="title"></span><span id="subtitle"></span>
   <span class="spacer"></span>
+  <select class="tbtn" id="verSel" title="Diagram version — edits create new versions; older ones stay selectable" hidden></select>
   <button class="tbtn" id="btnTarget" title="Where clicked code references open"></button>
   <button class="tbtn" id="btnResetView" title="Reset pan &amp; zoom">reset view</button>
   <button class="tbtn" id="btnResetLayout" title="Re-run the layout">reset layout</button>
@@ -265,43 +287,113 @@ function loadDiagramFile(file: string): unknown {
     return d;
 }
 
-function loadLatestFromDisk(): unknown | undefined {
+// Versioned lineages: ~/.jarbobo/diagrams/<id>/v<N>.json (written by the MCP server).
+function listVersions(id: string): number[] {
     try {
-        const files = fs.readdirSync(DIAGRAMS_DIR).filter(f => f.endsWith('.json')).sort().reverse();
-        if (!files.length) { return undefined; }
-        return loadDiagramFile(files[0]);
+        return fs.readdirSync(path.join(DIAGRAMS_DIR, id))
+            .map(f => /^v(\d+)\.json$/.exec(f)?.[1])
+            .filter((v): v is string => !!v)
+            .map(Number)
+            .sort((a, b) => a - b);
+    } catch {
+        return [];
+    }
+}
+
+function loadLineageVersion(id: string, version: number): Record<string, unknown> {
+    const file = path.join(DIAGRAMS_DIR, id, `v${version}.json`);
+    const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+    d._id = id;
+    d._version = version;
+    d._versions = listVersions(id);
+    d._file = file;
+    return d;
+}
+
+type HistoryEntry = { label: string; description: string; mtime: number; load: () => unknown };
+
+function historyEntries(): HistoryEntry[] {
+    const entries: HistoryEntry[] = [];
+    let dirents: fs.Dirent[] = [];
+    try {
+        dirents = fs.readdirSync(DIAGRAMS_DIR, { withFileTypes: true });
+    } catch {
+        return entries;
+    }
+    for (const e of dirents) {
+        try {
+            if (e.isDirectory()) {
+                const versions = listVersions(e.name);
+                if (!versions.length) { continue; }
+                const latest = versions[versions.length - 1];
+                const file = path.join(DIAGRAMS_DIR, e.name, `v${latest}.json`);
+                const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+                entries.push({
+                    label: d.title || e.name,
+                    description: `${d.type} · v${latest}${versions.length > 1 ? ` (${versions.length} versions)` : ''} · ${new Date(fs.statSync(file).mtimeMs).toLocaleString()}`,
+                    mtime: fs.statSync(file).mtimeMs,
+                    load: () => loadLineageVersion(e.name, latest),
+                });
+            } else if (e.name.endsWith('.json')) {
+                const full = path.join(DIAGRAMS_DIR, e.name);
+                const d = JSON.parse(fs.readFileSync(full, 'utf8'));
+                entries.push({
+                    label: d.title || e.name,
+                    description: `${d.type} · ${new Date(Number(e.name.split('-')[0]) || fs.statSync(full).mtimeMs).toLocaleString()}`,
+                    mtime: fs.statSync(full).mtimeMs,
+                    load: () => loadDiagramFile(e.name),
+                });
+            }
+        } catch { /* skip unreadable entries */ }
+    }
+    return entries.sort((a, b) => b.mtime - a.mtime);
+}
+
+function loadLatestFromDisk(): unknown | undefined {
+    const [latest] = historyEntries();
+    try {
+        return latest?.load();
     } catch {
         return undefined;
     }
 }
 
 async function openRecent() {
-    let files: string[] = [];
-    try {
-        files = fs.readdirSync(DIAGRAMS_DIR).filter(f => f.endsWith('.json')).sort().reverse().slice(0, 30);
-    } catch { /* ignore */ }
-    if (!files.length) {
+    const entries = historyEntries().slice(0, 30);
+    if (!entries.length) {
         vscode.window.showInformationMessage('Jarbobo: no saved diagrams yet.');
         return;
     }
-    const items = files.map(f => {
-        let title = '', type = '';
-        try {
-            const d = JSON.parse(fs.readFileSync(path.join(DIAGRAMS_DIR, f), 'utf8'));
-            title = d.title ?? '';
-            type = d.type ?? '';
-        } catch { /* ignore */ }
-        const when = new Date(Number(f.split('-')[0])).toLocaleString();
-        return { label: title || f, description: `${type} · ${when}`, file: f };
-    });
-    const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Open a recent Jarbobo diagram (new tab)' });
+    const pick = await vscode.window.showQuickPick(
+        entries.map(e => ({ label: e.label, description: e.description, entry: e })),
+        { placeHolder: 'Open a recent Jarbobo diagram (latest version)' },
+    );
     if (pick) {
         try {
-            createPanel(loadDiagramFile(pick.file), true);
+            openOrUpdatePanel(pick.entry.load() as Record<string, unknown>, true);
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot load diagram: ${e}`);
         }
     }
+}
+
+// If a tab already shows this diagram lineage (matching _id), update it in
+// place instead of opening a duplicate tab; otherwise create a new panel.
+function openOrUpdatePanel(d: Record<string, unknown>, focus: boolean) {
+    const id = d._id as string | undefined;
+    if (id) {
+        for (const [p, existing] of panels) {
+            if ((existing as Record<string, unknown> | undefined)?._id === id) {
+                panels.set(p, d);
+                if (d.title) { p.title = String(d.title).slice(0, 48); }
+                p.webview.postMessage({ type: 'render', diagram: d });
+                if (focus) { p.reveal(undefined, false); }
+                log(`updated panel in place: id=${id} v${String(d._version)}`);
+                return;
+            }
+        }
+    }
+    createPanel(d, focus);
 }
 
 // ---------------------------------------------------------------- HTTP bridge (MCP server -> extension)
@@ -318,7 +410,8 @@ function startServer() {
                 try {
                     const d = JSON.parse(body);
                     if (!d || typeof d !== 'object' || !d.type) { throw new Error('missing "type"'); }
-                    createPanel(d, false);
+                    // edits (same _id) update the existing tab; new lineages get a new tab
+                    openOrUpdatePanel(d, false);
                     res.writeHead(200, { 'content-type': 'application/json' });
                     res.end('{"ok":true}');
                 } catch (e) {

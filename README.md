@@ -46,6 +46,13 @@ Plus the viewer mechanics you'd expect from a real tool:
 - **`draw_class_diagram`** — UML classes: «stereotypes», attributes & methods with `+ - # ~`
   visibility, and honest UML relations — inheritance ▷, implements ⇢▷, composition ◆,
   aggregation ◇, association, dependency ⇢ — with cardinality labels.
+- **`list_diagrams`** / **`open_diagram`** — enumerate saved diagrams and re-display any
+  version of one (also returns its spec, so the LLM can roll back or build on it).
+
+**Edits are versioned.** Every draw call without an `id` creates a new diagram (new tab)
+and returns its id; passing the id back **edits** it — the content saves as the next
+version and the *existing tab updates in place*. A version picker in the panel's titlebar
+lets you flip back to any older version; nothing is ever overwritten.
 
 Validation is strict (unknown node ids, bad frame ranges → the tool call fails with a fixable
 message), so the LLM can't silently draw a broken picture.
@@ -116,6 +123,7 @@ your editor          reveals the line, respecting locked editor groups
 | highlight a code ref while hovering | hold **⌃ Ctrl** |
 | choose where refs open | **refs → code window / this window** toggle |
 | rearrange | drag nodes (graphs) or class boxes — layout persists |
+| switch diagram version | **v3 ▾** picker in the titlebar (edits bump the version; old ones stay) |
 | reopen anything | status bar item, or `Jarbobo: Open Recent Diagram` |
 
 ## Dev

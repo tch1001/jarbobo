@@ -152,6 +152,15 @@
   if (btnResetView) {
     btnResetView.addEventListener('click', () => { if (activeOps && activeOps.reset) { activeOps.reset(); } });
   }
+  const verSel = $('#verSel');
+  if (verSel) {
+    verSel.addEventListener('change', () => {
+      if (currentDiagram && currentDiagram._id) {
+        vscodeApi.postMessage({ type: 'loadVersion', id: currentDiagram._id, version: Number(verSel.value) });
+      }
+    });
+  }
+
   const btnResetLayout = $('#btnResetLayout');
   if (btnResetLayout) {
     btnResetLayout.addEventListener('click', () => {
@@ -270,6 +279,16 @@
     hideTip(); closeDetail();
     currentDiagram = d;
     vscodeApi.setState({ diagram: d }); // survives window reloads (panel serializer)
+    if (verSel) {
+      if (d._id && Array.isArray(d._versions) && d._versions.length) {
+        verSel.innerHTML = d._versions
+          .map((v) => `<option value="${v}"${v === d._version ? ' selected' : ''}>v${v}</option>`)
+          .join('');
+        verSel.hidden = false;
+      } else {
+        verSel.hidden = true; // legacy (pre-versioning) diagrams
+      }
+    }
     activeOps = null;
     $('#title').textContent = d.title || '';
     $('#subtitle').textContent = d.type === 'sequence' ? 'sequence diagram'
