@@ -52,6 +52,14 @@ export function activate(context: vscode.ExtensionContext) {
             createPanel(latest, true);
         }),
         vscode.commands.registerCommand('jarbobo.openRecent', openRecent),
+        vscode.commands.registerCommand('jarbobo.reopenClosed', () => {
+            const d = closedStack.pop();
+            if (d) {
+                createPanel(d, true);
+            } else {
+                vscode.window.showInformationMessage('Jarbobo: no recently closed diagrams in this session.');
+            }
+        }),
         // Restore jarbobo tabs (and their diagrams) across window reloads. The
         // diagram travels in the webview's persisted state (vscodeApi.setState).
         vscode.window.registerWebviewPanelSerializer('jarbobo', {
@@ -113,9 +121,20 @@ function createPanel(diagram: unknown, focus: boolean) {
     return panel;
 }
 
+// Recently closed diagrams (newest last) — restored by jarbobo.reopenClosed.
+const closedStack: unknown[] = [];
+
 function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
     panels.set(panel, diagram);
-    panel.onDidDispose(() => { panels.delete(panel); updateStatus(); });
+    panel.onDidDispose(() => {
+        const d = panels.get(panel);
+        panels.delete(panel);
+        if (d) {
+            closedStack.push(d);
+            if (closedStack.length > 20) { closedStack.shift(); }
+        }
+        updateStatus();
+    });
     panel.webview.onDidReceiveMessage((msg) => onWebviewMessage(panel, msg));
     updateStatus();
 }

@@ -299,17 +299,35 @@
     }
 
     const shapeMap = { box: 'round-rectangle', ellipse: 'ellipse', diamond: 'diamond', hexagon: 'hexagon', cylinder: 'barrel' };
+    // Explicit node dimensions from label measurement. Cytoscape's `width:'label'`
+    // is deprecated AND breaks edge rendering under the preset layout (edges
+    // project before label-based sizes resolve → invisible edges on reopen).
+    const GFONT = '12px -apple-system, sans-serif';
+    const nodeDims = (label) => {
+      let w = 0, rows = 0;
+      String(label).split('\n').forEach((ln) => {
+        const lw = tw(ln, GFONT);
+        w = Math.max(w, Math.min(lw, 150));
+        rows += Math.max(1, Math.ceil(lw / 150));
+      });
+      return { w: Math.max(24, Math.ceil(w) + 6), h: Math.max(18, rows * 15 + 4) };
+    };
     const els = [];
     (d.groups || []).forEach((g) => els.push({
       data: { id: g.id, label: g.label || g.id, isGroup: 1, color: g.color || MUTED },
     }));
-    (d.nodes || []).forEach((n) => els.push({
-      data: {
-        id: n.id, label: n.label || n.id, parent: n.group || undefined,
-        shape: shapeMap[n.shape] || 'round-rectangle',
-        color: n.color || ACCENT, _item: n,
-      },
-    }));
+    (d.nodes || []).forEach((n) => {
+      const label = n.label || n.id;
+      const dims = nodeDims(label);
+      els.push({
+        data: {
+          id: n.id, label, parent: n.group || undefined,
+          shape: shapeMap[n.shape] || 'round-rectangle',
+          w: dims.w, h: dims.h,
+          color: n.color || ACCENT, _item: n,
+        },
+      });
+    });
     (d.edges || []).forEach((e, i) => els.push({
       data: {
         id: '__e' + i, source: e.from, target: e.to, label: e.label || '',
@@ -338,7 +356,6 @@
         {
           selector: 'node',
           style: {
-            shape: 'data(shape)',
             'background-color': 'data(color)',
             'background-opacity': 0.18,
             'border-color': 'data(color)',
@@ -350,14 +367,16 @@
             'text-halign': 'center',
             'text-wrap': 'wrap',
             'text-max-width': 150,
-            width: 'label',
-            height: 'label',
             padding: 12,
           },
         },
+        // scoped so compound parents (no shape/w data) don't trigger mapping warnings
+        { selector: 'node[shape]', style: { shape: 'data(shape)' } },
+        { selector: 'node[w]', style: { width: 'data(w)', height: 'data(h)' } },
         {
           selector: ':parent',
           style: {
+            shape: 'round-rectangle',
             'background-color': 'data(color)',
             'background-opacity': 0.06,
             'border-color': 'data(color)',
@@ -393,6 +412,8 @@
         },
       ],
     });
+
+    window.__cy = cy; // debugging handle (harmless in production)
 
     cy.on('mousemove', 'node, edge', (ev) => {
       const oe = ev.originalEvent;

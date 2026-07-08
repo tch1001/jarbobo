@@ -28,6 +28,10 @@
       {
         "command": "jarbobo.openRecent",
         "title": "Jarbobo: Open Recent Diagram"
+      },
+      {
+        "command": "jarbobo.reopenClosed",
+        "title": "Jarbobo: Reopen Closed Diagram"
       }
     ]
   },
