@@ -207,35 +207,28 @@ async function onWebviewMessage(
         // bug: github.com/microsoft/vscode/issues/201053). So for 'here' on a
         // floated panel we open the file, then immediately reveal the panel
         // with focus to bounce OS focus back to the diagram's window.
+        // 'here' = open the file in THIS panel's own editor group (works for
+        // floated windows too: aux-window groups are addressable by their
+        // viewColumn number — confirmed from field logs, panel.viewColumn=3
+        // for a floated panel) and let focus follow it, so the code appears
+        // focused in the same window as the diagram, as a sibling tab.
+        // Deliberately NO preserveFocus and NO focus bounce-back: with
+        // preserveFocus:true the workbench "restores" focus to what it
+        // believes was focused — the MAIN window (vscode#201053) — and
+        // panel.reveal cannot re-activate an aux-window panel
+        // (field-verified: panel.active stayed false after reveal).
+        // 'main' = explicitly take me to the code in the main window.
         const viewColumn = msg.target === 'here'
             ? (panel.viewColumn ?? vscode.ViewColumn.Beside)
             : vscode.ViewColumn.One;
-        const preserveFocus = msg.target === 'here';
-        log(`open ref: target=${msg.target} panel.viewColumn=${String(panel.viewColumn)} panel.active=${panel.active} -> viewColumn=${viewColumn} preserveFocus=${preserveFocus}`);
+        log(`open ref: target=${msg.target} panel.viewColumn=${String(panel.viewColumn)} panel.active=${panel.active} -> viewColumn=${viewColumn}`);
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
-            const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus });
+            const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus: false });
             if (msg.line && msg.line > 0) {
                 const pos = new vscode.Position(msg.line - 1, 0);
                 editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
                 editor.selection = new vscode.Selection(pos, pos);
-            }
-            if (msg.target === 'here') {
-                // 'here' means: never leave the diagram. showTextDocument
-                // activates the target window even with preserveFocus:true
-                // (vscode#201053), so we bounce focus back to this panel
-                // unconditionally — the previous viewColumn===undefined
-                // "floated" heuristic was unreliable for aux windows. The
-                // small delay lets the OS-level activation settle first so
-                // our reveal is the last word.
-                setTimeout(() => {
-                    try {
-                        panel.reveal(undefined, false);
-                        log(`bounced focus back: panel.active=${panel.active} viewColumn=${String(panel.viewColumn)}`);
-                    } catch (e) {
-                        log(`bounce failed: ${e}`);
-                    }
-                }, 120);
             }
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot open ${msg.file}: ${e}`);
