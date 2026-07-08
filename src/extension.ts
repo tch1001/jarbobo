@@ -55,7 +55,12 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('jarbobo.reopenClosed', () => {
             const d = closedStack.pop();
             if (d) {
-                createPanel(d, true);
+                // No forced focus: if the diagram was floated into its own
+                // window, this necessarily recreates it in the main window
+                // (see bestViewColumn's caveat above) — stealing OS focus
+                // there on top of that would be doubly disruptive. The tab
+                // still appears; switch to it when you're ready.
+                createPanel(d, false);
             } else {
                 vscode.window.showInformationMessage('Jarbobo: no recently closed diagrams in this session.');
             }
@@ -106,7 +111,11 @@ export function deactivate() {
 // ---------------------------------------------------------------- panels
 
 // New diagrams open in the editor group that already holds the most jarbobo
-// tabs (works across floating windows too); falls back to Beside.
+// tabs. CAVEAT: vscode.window.tabGroups only sees the main window's editor
+// area — VS Code's extension API has no way to detect or target tabs in an
+// auxiliary (floated-out) window (github.com/microsoft/vscode/issues/180717).
+// If you've floated jarbobo into its own window, this always resolves within
+// the main window instead — there is currently no API to do otherwise.
 function bestViewColumn(): vscode.ViewColumn {
     const counts = new Map<number, number>();
     for (const group of vscode.window.tabGroups.all) {
@@ -180,15 +189,24 @@ async function onWebviewMessage(
             } catch { /* best-effort */ }
         }
     } else if (msg.type === 'open' && msg.file) {
-        // target 'here' = the editor group hosting this jarbobo tab (works in floated
-        // windows too); 'main' = group one. Either way VS Code's locked-group rules
-        // apply: a locked target group redirects the editor to an unlocked group.
+        // target 'main' = explicit "take me to the code" — focus it there.
+        // target 'here' = editor group hosting THIS tab. If jarbobo is floated
+        // into its own window, `panel.viewColumn` still only resolves within
+        // the main window (extensions can't address auxiliary windows —
+        // github.com/microsoft/vscode/issues/180717), so the file necessarily
+        // opens in the main window either way. What we CAN control is whether
+        // that steals OS focus: for 'here' we deliberately do NOT, so the
+        // floated diagram window you're looking at stays in front; the file
+        // opens in the background for you to switch to when ready. VS Code's
+        // locked-group rules still apply: a locked target group redirects to
+        // an unlocked one.
         const viewColumn = msg.target === 'here'
             ? (panel.viewColumn ?? vscode.ViewColumn.Beside)
             : vscode.ViewColumn.One;
+        const preserveFocus = msg.target === 'here';
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
-            const editor = await vscode.window.showTextDocument(doc, { viewColumn });
+            const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus });
             if (msg.line && msg.line > 0) {
                 const pos = new vscode.Position(msg.line - 1, 0);
                 editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
