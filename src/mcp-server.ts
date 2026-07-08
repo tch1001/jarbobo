@@ -71,6 +71,7 @@ const server = new McpServer(
             'Jarbobo renders interactive diagrams inside the user\'s editor in a side panel. ' +
             'Each draw call replaces the panel\'s current diagram (history is kept and reachable via the "Jarbobo: Open Recent Diagram" command). ' +
             'Make full use of interactivity instead of cramming text into the picture: keep on-diagram labels short; put one-liners in `tooltip` (hover); put paragraphs in `detail` (click opens a side panel); set `file`+`line` so clicking jumps straight to the source that the element represents; use `href` for docs/links. ' +
+            'User gestures worth mentioning when relevant: a plain click opens the detail panel (when `detail` is set); cmd/ctrl+click on any element opens its `file`+`line` code reference directly, bypassing the panel; holding Ctrl while hovering highlights the code reference in the tooltip. ' +
             'Prefer two or three focused diagrams over one overloaded one.',
     },
 );

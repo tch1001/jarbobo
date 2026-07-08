@@ -38,14 +38,40 @@
 
   // ---------------------------------------------------------------- tooltip + detail panel
 
-  function showTip(text, x, y) {
-    tip.textContent = text;
+  function escHtml(s) {
+    const el = document.createElement('div');
+    el.textContent = s == null ? '' : String(s);
+    return el.innerHTML;
+  }
+
+  let hoverRef = null; // {item, x, y} while a tooltip is visible — lets Ctrl re-style it live
+
+  function showItemTip(item, x, y, ctrl) {
+    const hasTip = item && item.tooltip;
+    const hasRef = item && item.file;
+    if (!hasTip && !hasRef) { return; }
+    const parts = [];
+    if (hasTip) { parts.push('<div>' + escHtml(item.tooltip) + '</div>'); }
+    if (hasRef) {
+      parts.push('<div class="ref' + (ctrl ? ' bold' : '') + '">'
+        + escHtml(item.file + (item.line ? ':' + item.line : '')) + '</div>');
+    }
+    tip.innerHTML = parts.join('');
     tip.style.display = 'block';
     const r = tip.getBoundingClientRect();
     tip.style.left = Math.min(x + 14, window.innerWidth - r.width - 8) + 'px';
     tip.style.top = Math.min(y + 14, window.innerHeight - r.height - 8) + 'px';
+    hoverRef = { item, x, y };
   }
-  function hideTip() { tip.style.display = 'none'; }
+  function hideTip() { tip.style.display = 'none'; hoverRef = null; }
+
+  // hold Ctrl while hovering → the code reference line goes bold
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Control' && hoverRef) { showItemTip(hoverRef.item, hoverRef.x, hoverRef.y, true); }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'Control' && hoverRef) { showItemTip(hoverRef.item, hoverRef.x, hoverRef.y, false); }
+  });
 
   let detailLocked = false;
   let detailOpenedAt = 0;
@@ -134,18 +160,18 @@
     });
   }
 
-  // Hover text: tooltip plus the code reference (file:line) when present.
-  function hoverText(item) {
-    if (!item) { return null; }
-    const parts = [];
-    if (item.tooltip) { parts.push(item.tooltip); }
-    if (item.file) { parts.push(item.file + (item.line ? ':' + item.line : '')); }
-    return parts.length ? parts.join('\n') : null;
-  }
+
+  // Set briefly after a drag so the trailing click doesn't open the detail panel.
+  let suppressClick = false;
 
   // Click policy: detail panel if there is detail text, else jump to file, else open url.
-  function interact(item, label, kind) {
-    if (!item) { return; }
+  // cmd/ctrl+click (opts.direct) skips the panel and opens the code reference immediately.
+  function interact(item, label, kind, opts) {
+    if (!item || suppressClick) { return; }
+    if (opts && opts.direct) {
+      if (item.file) { vscodeApi.postMessage({ type: 'open', file: item.file, line: item.line, target: openTarget }); return; }
+      if (item.href) { vscodeApi.postMessage({ type: 'openUrl', url: item.href }); return; }
+    }
     if (item.detail) { openDetail(item, label, kind); }
     else if (item.file) { vscodeApi.postMessage({ type: 'open', file: item.file, line: item.line, target: openTarget }); }
     else if (item.href) { vscodeApi.postMessage({ type: 'openUrl', url: item.href }); }
@@ -155,12 +181,12 @@
 
   function bindSvgItem(el, item, label, kind) {
     if (!item) { return; }
-    el.addEventListener('mousemove', (e) => {
-      const t = hoverText(item);
-      if (t) { showTip(t, e.clientX, e.clientY); }
-    });
+    el.addEventListener('mousemove', (e) => showItemTip(item, e.clientX, e.clientY, e.ctrlKey));
     el.addEventListener('mouseleave', hideTip);
-    el.addEventListener('click', (e) => { e.stopPropagation(); interact(item, label, kind); });
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      interact(item, label, kind, { direct: e.metaKey || e.ctrlKey });
+    });
     if (isInteractive(item)) { el.classList.add('clickable'); }
   }
 
@@ -194,12 +220,20 @@
   });
 
   function makeSvgViewport(svg) {
-    let tx = 0, ty = 0, k = 1;
-    svg.style.transformOrigin = '0 0';
-    const apply = () => { svg.style.transform = `translate(${tx}px, ${ty}px) scale(${k})`; };
-    const sw = Number(svg.getAttribute('width')) || 0;
-    const tx0 = sw < stage.clientWidth ? (stage.clientWidth - sw) / 2 : 0;
-    tx = tx0;
+    // Zoom/pan via an SVG attribute transform on a wrapper <g>, NOT a CSS transform
+    // on the <svg>: CSS transforms rasterize the layer once and scale the bitmap
+    // (fuzzy text); attribute transforms re-render vectors crisply at every scale.
+    const natW = Number(svg.getAttribute('width')) || 0;
+    const vp = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    while (svg.firstChild) { vp.appendChild(svg.firstChild); }
+    svg.appendChild(vp);
+    svg.removeAttribute('viewBox');
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', '100%');
+    let k = 1;
+    const tx0 = natW < stage.clientWidth ? (stage.clientWidth - natW) / 2 : 0;
+    let tx = tx0, ty = 0;
+    const apply = () => { vp.setAttribute('transform', `translate(${tx} ${ty}) scale(${k})`); };
     apply();
     return {
       pan(dx, dy) { tx += dx; ty += dy; apply(); },
@@ -214,6 +248,9 @@
         apply();
       },
       reset() { tx = tx0; ty = 0; k = 1; apply(); },
+      getZoom() { return k; },
+      getState() { return { tx, ty, k }; },
+      setState(s) { tx = s.tx; ty = s.ty; k = s.k; apply(); },
     };
   }
 
@@ -353,11 +390,8 @@
     });
 
     cy.on('mousemove', 'node, edge', (ev) => {
-      const t = hoverText(ev.target.data('_item'));
-      if (t) {
-        const oe = ev.originalEvent;
-        showTip(t, oe.clientX, oe.clientY);
-      }
+      const oe = ev.originalEvent;
+      showItemTip(ev.target.data('_item'), oe.clientX, oe.clientY, oe.ctrlKey);
     });
     cy.on('mouseout', 'node, edge', hideTip);
     cy.on('mouseover', 'node, edge', (ev) => {
@@ -366,7 +400,9 @@
     });
     cy.on('tap', 'node, edge', (ev) => {
       const item = ev.target.data('_item');
-      interact(item, ev.target.data('label'), ev.target.isNode() ? 'node' : 'edge');
+      const oe = ev.originalEvent || {};
+      interact(item, ev.target.data('label'), ev.target.isNode() ? 'node' : 'edge',
+        { direct: !!(oe.metaKey || oe.ctrlKey) });
     });
 
     // persist the arrangement whenever the user finishes dragging a node
@@ -661,9 +697,20 @@
       boxes[cl.id].x = n.x; boxes[cl.id].y = n.y;
     });
 
-    const gr = g.graph();
-    const width = Math.max(gr.width + 40, 300), height = Math.max(gr.height + 40, 200);
+    // user-saved arrangement (drag & drop) overrides the dagre layout
+    const savedPos = d._layout && classes.every((c) => d._layout[c.id]) ? d._layout : null;
+    if (savedPos) {
+      classes.forEach((cl) => { boxes[cl.id].x = savedPos[cl.id].x; boxes[cl.id].y = savedPos[cl.id].y; });
+    }
+
+    let width = 300, height = 200;
+    classes.forEach((cl) => {
+      const b = boxes[cl.id];
+      width = Math.max(width, b.x + b.w / 2 + 24);
+      height = Math.max(height, b.y + b.h / 2 + 24);
+    });
     const svg = svgEl('svg', { width, height, viewBox: `0 0 ${width} ${height}` });
+    const relEls = []; // live-updated while dragging a class box
 
     // markers
     const defs = svgEl('defs', {});
@@ -705,16 +752,19 @@
         : r.kind === 'dependency' || (r.kind === 'association' && r.directed) ? 'url(#jbVee)'
         : undefined;
       const rg = svgEl('g', {});
-      rg.appendChild(svgEl('line', {
+      const relLine = svgEl('line', {
         x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y,
         stroke: FG, 'stroke-width': 1.3,
         'stroke-dasharray': dashed ? '6 4' : undefined,
         'marker-end': markerEnd,
-      }));
-      rg.appendChild(svgEl('line', {
+      });
+      const relHit = svgEl('line', {
         x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y,
         stroke: 'transparent', 'stroke-width': 12,
-      }));
+      });
+      rg.appendChild(relLine);
+      rg.appendChild(relHit);
+      relEls.push({ r, line: relLine, hit: relHit });
       const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
       if (r.label) { labelWithBg(svg, mx, my - 5, r.label, { size: 11 }); }
       if (r.fromLabel) { labelWithBg(svg, p1.x + (p2.x >= p1.x ? 12 : -12), p1.y + (p2.y >= p1.y ? 14 : -8), r.fromLabel, { size: 10.5, fill: MUTED }); }
@@ -763,8 +813,55 @@
         }, s));
       });
       bindSvgItem(cg, cl, b.name, 'class');
+      attachClassDrag(cg, cl.id);
+      cg.classList.add('draggable');
       svg.appendChild(cg);
     });
+
+    // drag a class box: live-update its edges; persist + clean redraw on release
+    function attachClassDrag(cg, clId) {
+      cg.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) { return; }
+        e.stopPropagation();
+        const b = boxes[clId];
+        const sx = e.clientX, sy = e.clientY, ox = b.x, oy = b.y;
+        let moved = false;
+        const move = (me) => {
+          const kz = activeOps && activeOps.getZoom ? activeOps.getZoom() : 1;
+          const dx = (me.clientX - sx) / kz, dy = (me.clientY - sy) / kz;
+          if (!moved && Math.abs(dx) + Math.abs(dy) < 4) { return; }
+          moved = true;
+          b.x = ox + dx; b.y = oy + dy;
+          cg.setAttribute('transform', `translate(${b.x - ox} ${b.y - oy})`);
+          relEls.forEach((re) => {
+            if (re.r.from !== clId && re.r.to !== clId) { return; }
+            const A = boxes[re.r.from], B = boxes[re.r.to];
+            if (!A || !B) { return; }
+            const q1 = borderPoint(A, B.x, B.y), q2 = borderPoint(B, A.x, A.y);
+            [re.line, re.hit].forEach((ln) => {
+              ln.setAttribute('x1', q1.x); ln.setAttribute('y1', q1.y);
+              ln.setAttribute('x2', q2.x); ln.setAttribute('y2', q2.y);
+            });
+          });
+        };
+        const up = () => {
+          window.removeEventListener('mousemove', move);
+          window.removeEventListener('mouseup', up);
+          if (!moved) { return; }
+          suppressClick = true;
+          setTimeout(() => { suppressClick = false; }, 150);
+          const positions = {};
+          classes.forEach((c) => { positions[c.id] = { x: boxes[c.id].x, y: boxes[c.id].y }; });
+          d._layout = positions;
+          vscodeApi.postMessage({ type: 'layout', positions });
+          const vpState = activeOps && activeOps.getState ? activeOps.getState() : null;
+          render(d); // clean redraw so relation labels and sizing follow
+          if (vpState && activeOps && activeOps.setState) { activeOps.setState(vpState); }
+        };
+        window.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+      });
+    }
 
     stage.appendChild(svg);
     activeOps = makeSvgViewport(svg);

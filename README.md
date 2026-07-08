@@ -7,10 +7,11 @@ Graphs, UML sequence diagrams, and class diagrams that live in Cursor as first-c
 **every node is a live pointer into your code**: hover it for the gist, click it and your editor
 jumps to the exact `file:line`.
 
-![jarbobo demo — LLM-drawn diagram on the left, click a node, the editor jumps to the source line on the right](assets/demo.gif)
+[![jarbobo demo — click to watch the full video](assets/poster.png)](assets/demo.mov)
 
-*Above: exploring pybind11's internals. The diagram was drawn by Claude via MCP; clicking
-`struct internals` focuses `internals.h:302` in the editor.*
+*Above: exploring pybind11's internals — **click the image to watch the full demo** (0:14).
+The diagram was drawn by Claude via MCP; clicking `struct internals` focuses `internals.h:302`
+in the editor.*
 
 ---
 
@@ -24,7 +25,7 @@ contract:
 |---|---|
 | `tooltip` | hover text on any node, edge, message, or class |
 | `detail` | click → side panel with the full explanation (lockable 🔒, click-outside to close) |
-| `file` + `line` | **click → your editor opens that source line** |
+| `file` + `line` | **click → your editor opens that source line** (⌘-click skips the detail panel and jumps straight there; hold ⌃ while hovering to highlight the reference) |
 | `href` | click → docs / PR / dashboard |
 
 Plus the viewer mechanics you'd expect from a real tool:
@@ -104,8 +105,11 @@ your editor          reveals the line, respecting locked editor groups
 | zoom | ⌘-scroll (around cursor) |
 | reset pan/zoom | **reset view** button |
 | recompute layout (discard drags) | **reset layout** button |
-| pin the detail panel | 🔓 → 🔒 next to ✕ |
+| pin the detail panel | 🔓 → 🔒 next to ✕ (click outside closes it when unlocked) |
+| open a code ref directly (skip panel) | **⌘-click** the element |
+| highlight a code ref while hovering | hold **⌃ Ctrl** |
 | choose where refs open | **refs → code window / this window** toggle |
+| rearrange | drag nodes (graphs) or class boxes — layout persists |
 | reopen anything | status bar item, or `Jarbobo: Open Recent Diagram` |
 
 ## Dev

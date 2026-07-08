@@ -64,13 +64,32 @@ export function deactivate() {
 
 // ---------------------------------------------------------------- panels
 
+// New diagrams open in the editor group that already holds the most jarbobo
+// tabs (works across floating windows too); falls back to Beside.
+function bestViewColumn(): vscode.ViewColumn {
+    const counts = new Map<number, number>();
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputWebview && tab.input.viewType.includes('jarbobo')) {
+                counts.set(group.viewColumn, (counts.get(group.viewColumn) ?? 0) + 1);
+            }
+        }
+    }
+    let best: vscode.ViewColumn | undefined;
+    let max = 0;
+    for (const [col, n] of counts) {
+        if (n > max) { max = n; best = col; }
+    }
+    return best ?? vscode.ViewColumn.Beside;
+}
+
 function createPanel(diagram: unknown, focus: boolean) {
     const d = diagram as { title?: string } | undefined;
     const title = d?.title ? String(d.title).slice(0, 48) : 'Jarbobo';
     const panel = vscode.window.createWebviewPanel(
         'jarbobo',
         title,
-        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: !focus },
+        { viewColumn: bestViewColumn(), preserveFocus: !focus },
         {
             enableScripts: true,
             retainContextWhenHidden: true,
