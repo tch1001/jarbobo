@@ -207,12 +207,11 @@ async function onWebviewMessage(
         // bug: github.com/microsoft/vscode/issues/201053). So for 'here' on a
         // floated panel we open the file, then immediately reveal the panel
         // with focus to bounce OS focus back to the diagram's window.
-        const floated = panel.viewColumn === undefined; // aux-window panels aren't in the main grid
         const viewColumn = msg.target === 'here'
             ? (panel.viewColumn ?? vscode.ViewColumn.Beside)
             : vscode.ViewColumn.One;
         const preserveFocus = msg.target === 'here';
-        log(`open ref: target=${msg.target} floated=${floated} panel.viewColumn=${String(panel.viewColumn)} -> viewColumn=${viewColumn} preserveFocus=${preserveFocus}`);
+        log(`open ref: target=${msg.target} panel.viewColumn=${String(panel.viewColumn)} panel.active=${panel.active} -> viewColumn=${viewColumn} preserveFocus=${preserveFocus}`);
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
             const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus });
@@ -221,8 +220,22 @@ async function onWebviewMessage(
                 editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
                 editor.selection = new vscode.Selection(pos, pos);
             }
-            if (msg.target === 'here' && floated) {
-                panel.reveal(undefined, false); // re-activate the floated window
+            if (msg.target === 'here') {
+                // 'here' means: never leave the diagram. showTextDocument
+                // activates the target window even with preserveFocus:true
+                // (vscode#201053), so we bounce focus back to this panel
+                // unconditionally — the previous viewColumn===undefined
+                // "floated" heuristic was unreliable for aux windows. The
+                // small delay lets the OS-level activation settle first so
+                // our reveal is the last word.
+                setTimeout(() => {
+                    try {
+                        panel.reveal(undefined, false);
+                        log(`bounced focus back: panel.active=${panel.active} viewColumn=${String(panel.viewColumn)}`);
+                    } catch (e) {
+                        log(`bounce failed: ${e}`);
+                    }
+                }, 120);
             }
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot open ${msg.file}: ${e}`);
