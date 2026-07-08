@@ -265,6 +265,7 @@ function buildHtml(webview: vscode.Webview): string {
   <button class="tbtn" id="btnTarget" title="Where clicked code references open"></button>
   <button class="tbtn" id="btnResetView" title="Reset pan &amp; zoom">reset view</button>
   <button class="tbtn" id="btnResetLayout" title="Re-run the layout">reset layout</button>
+  <button class="tbtn" id="btnTranspose" title="Swap the x and y coordinates of every element">transpose layout</button>
 </div>
 <div id="stage"></div>
 <div id="tooltip"></div>

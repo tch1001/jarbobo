@@ -17,6 +17,7 @@
 
   let currentDiagram = null;   // for "reset layout" (full re-render)
   let openTarget = 'main';     // where code refs open: 'main' window vs 'here' (jarbobo's group)
+  let lastClassPositions = null; // class-box centers from the latest renderClass, for transpose
 
   // ---------------------------------------------------------------- theme
 
@@ -173,6 +174,38 @@
     });
   }
 
+  // Swap x/y of every element's position and persist it like a drag would,
+  // so the transposed arrangement survives reopen and carries into edits.
+  const btnTranspose = $('#btnTranspose');
+  if (btnTranspose) {
+    btnTranspose.addEventListener('click', () => {
+      if (!currentDiagram) { return; }
+      if (currentDiagram.type === 'graph' && window.__cy) {
+        const cy = window.__cy;
+        const positions = {};
+        cy.nodes().forEach((n) => {
+          if (n.isParent()) { return; }
+          const p = n.position();
+          positions[n.id()] = { x: p.y, y: p.x };
+        });
+        cy.nodes().forEach((n) => {
+          if (!n.isParent() && positions[n.id()]) { n.position(positions[n.id()]); }
+        });
+        cy.fit(undefined, 30);
+        currentDiagram._layout = positions;
+        vscodeApi.postMessage({ type: 'layout', positions });
+        vscodeApi.setState({ diagram: currentDiagram });
+      } else if (currentDiagram.type === 'class' && lastClassPositions) {
+        const positions = {};
+        for (const id in lastClassPositions) {
+          positions[id] = { x: lastClassPositions[id].y, y: lastClassPositions[id].x };
+        }
+        currentDiagram._layout = positions;
+        vscodeApi.postMessage({ type: 'layout', positions });
+        render(currentDiagram);
+      }
+    });
+  }
 
   // Set briefly after a drag so the trailing click doesn't open the detail panel.
   let suppressClick = false;
@@ -289,6 +322,7 @@
         verSel.hidden = true; // legacy (pre-versioning) diagrams
       }
     }
+    if (btnTranspose) { btnTranspose.hidden = d.type === 'sequence'; } // lifelines have no free layout
     activeOps = null;
     $('#title').textContent = d.title || '';
     $('#subtitle').textContent = d.type === 'sequence' ? 'sequence diagram'
@@ -954,6 +988,9 @@
         window.addEventListener('mouseup', up);
       });
     }
+
+    lastClassPositions = {};
+    classes.forEach((cl) => { lastClassPositions[cl.id] = { x: boxes[cl.id].x, y: boxes[cl.id].y }; });
 
     stage.appendChild(svg);
     activeOps = makeSvgViewport(svg);
