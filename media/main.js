@@ -4,7 +4,11 @@
 
   const vscodeApi = typeof acquireVsCodeApi === 'function'
     ? acquireVsCodeApi()
-    : { postMessage: (m) => console.log('[jarbobo dev] postMessage', m) };
+    : {
+        postMessage: (m) => console.log('[jarbobo dev] postMessage', m),
+        getState: () => null,
+        setState: () => {},
+      };
 
   const $ = (s) => document.querySelector(s);
   const stage = $('#stage');
@@ -265,6 +269,7 @@
     readTheme();
     hideTip(); closeDetail();
     currentDiagram = d;
+    vscodeApi.setState({ diagram: d }); // survives window reloads (panel serializer)
     activeOps = null;
     $('#title').textContent = d.title || '';
     $('#subtitle').textContent = d.type === 'sequence' ? 'sequence diagram'
@@ -413,6 +418,7 @@
       });
       d._layout = positions;
       vscodeApi.postMessage({ type: 'layout', positions });
+      vscodeApi.setState({ diagram: d });
     });
 
     activeOps = {
@@ -868,6 +874,11 @@
   }
 
   // ---------------------------------------------------------------- ready
+
+  // After a window reload the serializer restores the tab; the diagram comes
+  // back from our own persisted webview state without waiting on the extension.
+  const savedState = vscodeApi.getState && vscodeApi.getState();
+  if (savedState && savedState.diagram) { render(savedState.diagram); }
 
   vscodeApi.postMessage({ type: 'ready' });
 })();

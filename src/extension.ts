@@ -52,6 +52,18 @@ export function activate(context: vscode.ExtensionContext) {
             createPanel(latest, true);
         }),
         vscode.commands.registerCommand('jarbobo.openRecent', openRecent),
+        // Restore jarbobo tabs (and their diagrams) across window reloads. The
+        // diagram travels in the webview's persisted state (vscodeApi.setState).
+        vscode.window.registerWebviewPanelSerializer('jarbobo', {
+            async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: { diagram?: unknown } | undefined) {
+                panel.webview.options = {
+                    enableScripts: true,
+                    localResourceRoots: [vscode.Uri.joinPath(extCtx.extensionUri, 'media')],
+                };
+                panel.webview.html = buildHtml(panel.webview);
+                wirePanel(panel, state?.diagram);
+            },
+        }),
     );
 
     startServer();
@@ -97,11 +109,15 @@ function createPanel(diagram: unknown, focus: boolean) {
         },
     );
     panel.webview.html = buildHtml(panel.webview);
+    wirePanel(panel, diagram);
+    return panel;
+}
+
+function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
     panels.set(panel, diagram);
     panel.onDidDispose(() => { panels.delete(panel); updateStatus(); });
     panel.webview.onDidReceiveMessage((msg) => onWebviewMessage(panel, msg));
     updateStatus();
-    return panel;
 }
 
 async function onWebviewMessage(
