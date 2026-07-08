@@ -1,0 +1,48 @@
+{
+  "name": "jarbobo",
+  "displayName": "Jarbobo Diagrams",
+  "description": "Interactive graph, sequence and UML class diagrams drawn by LLMs via MCP — with clickable, hoverable elements that link back to source code.",
+  "version": "0.1.0",
+  "publisher": "jarbobo",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "jarbobo.openPanel",
+        "title": "Jarbobo: Open Diagram Panel"
+      },
+      {
+        "command": "jarbobo.openRecent",
+        "title": "Jarbobo: Open Recent Diagram"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "vendor": "node scripts/vendor.mjs",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.3.0",
+    "cytoscape": "^3.30.0",
+    "cytoscape-dagre": "^2.5.0",
+    "dagre": "^0.8.5",
+    "typescript": "^5.4.0"
+  }
+}

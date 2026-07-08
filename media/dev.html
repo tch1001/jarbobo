@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+:root {
+  --vscode-editor-background: #1e1e1e;
+  --vscode-editor-foreground: #d4d4d4;
+  --vscode-font-family: -apple-system, 'Segoe UI', sans-serif;
+  --vscode-panel-border: #3c3c3c;
+  --vscode-descriptionForeground: #9d9d9d;
+  --vscode-editorWidget-background: #252526;
+  --vscode-editorHoverWidget-background: #252526;
+  --vscode-editorHoverWidget-border: #454545;
+  --vscode-charts-blue: #569cd6;
+  --vscode-textLink-foreground: #3794ff;
+  --vscode-button-background: #0e639c;
+  --vscode-button-foreground: #ffffff;
+}
+#devbar { position: fixed; bottom: 8px; right: 8px; z-index: 999; display: flex; gap: 6px; }
+#devbar button { background: #333; color: #ddd; border: 1px solid #555; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
+</style>
+<link rel="stylesheet" href="main.css">
+</head>
+<body>
+<div id="titlebar">
+  <span id="title"></span><span id="subtitle"></span>
+  <span class="spacer"></span>
+  <button class="tbtn" id="btnTarget" title="Where clicked code references open"></button>
+  <button class="tbtn" id="btnResetView" title="Reset pan &amp; zoom">reset view</button>
+  <button class="tbtn" id="btnResetLayout" title="Re-run the layout">reset layout</button>
+</div>
+<div id="stage"></div>
+<div id="tooltip"></div>
+<aside id="detail" hidden>
+  <button id="closeDetail">✕</button>
+  <div class="kind" id="detailKind"></div>
+  <h2 id="detailTitle"></h2>
+  <pre id="detailBody"></pre>
+  <div class="actions" id="detailActions"></div>
+</aside>
+<div id="devbar">
+  <button onclick="show('graph')">graph</button>
+  <button onclick="show('sequence')">sequence</button>
+  <button onclick="show('class')">class</button>
+</div>
+<script src="vendor/dagre.min.js"></script>
+<script src="vendor/cytoscape.min.js"></script>
+<script src="vendor/cytoscape-dagre.js"></script>
+<script src="main.js"></script>
+<script>
+const samples = {
+  graph: {
+    type: 'graph',
+    title: 'import example — how Python calls into C++',
+    layout: 'layered',
+    direction: 'TB',
+    groups: [
+      { id: 'py', label: 'CPython interpreter', color: '#569cd6' },
+      { id: 'so', label: 'example.cpython-313-darwin.so', color: '#4ec9b0' }
+    ],
+    nodes: [
+      { id: 'eval', label: 'eval loop\nIMPORT_NAME', group: 'py', tooltip: '_PyEval_EvalFrameDefault hits the import opcode' },
+      { id: 'imp', label: '_imp_create_dynamic', group: 'py', tooltip: 'dlopen() the .so, dlsym("PyInit_example")', detail: 'importlib recognizes the extension suffix, loads the shared object into the process, and looks up the PyInit_<name> symbol — a raw C function pointer.' },
+      { id: 'init', label: 'PyInit_example', group: 'so', color: '#dcdcaa', shape: 'hexagon', tooltip: 'THE boundary: interpreter calls a C function pointer', file: '/Users/fish/exploring-pybind11/example.cpp', line: 5 },
+      { id: 'exec', label: 'pybind11_exec_example', group: 'so', tooltip: 'runs the PYBIND11_MODULE body' },
+      { id: 'slot', label: 'function_record\n(&add stored)', group: 'so', shape: 'cylinder', color: '#ce9178', tooltip: 'data slot holding the C++ function pointer' },
+      { id: 'tramp', label: 'trampoline __invoke', group: 'so', tooltip: 'unpacks Python args → C ints, wraps result' },
+      { id: 'add', label: 'add(int, int)', group: 'so', color: '#4ec9b0', tooltip: 'add w0, w1, w0 ; ret', file: '/Users/fish/exploring-pybind11/example.cpp', line: 3 }
+    ],
+    edges: [
+      { from: 'eval', to: 'imp', label: 'import example' },
+      { from: 'imp', to: 'init', label: 'dlsym → call', color: '#dcdcaa', tooltip: 'the Python→C++ transition' },
+      { from: 'init', to: 'exec', label: 'exec slot (PEP 489)' },
+      { from: 'exec', to: 'slot', label: 'm.def stores &add', style: 'dashed' },
+      { from: 'tramp', to: 'slot', label: 'loads pointer', style: 'dotted', arrow: 'open' },
+      { from: 'tramp', to: 'add', label: 'indirect call', style: 'dashed' }
+    ]
+  },
+  sequence: {
+    type: 'sequence',
+    title: 'example.add(3, 4) — call-time boundary',
+    participants: [
+      { id: 'user', label: 'script', kind: 'actor' },
+      { id: 'eval', label: 'eval loop', tooltip: '_PyEval_EvalFrameDefault' },
+      { id: 'vc', label: 'vectorcall', tooltip: 'cfunction_vectorcall — args as C array, no tuple' },
+      { id: 'tr', label: 'trampoline', tooltip: 'pybind11 cpp_function::initialize::__invoke' },
+      { id: 'add', label: 'add()', tooltip: 'your C++: one arm64 instruction' }
+    ],
+    messages: [
+      { from: 'user', to: 'eval', label: 'example.add(3, 4)', kind: 'sync' },
+      { from: 'eval', to: 'vc', label: 'CALL (args on value stack)', kind: 'sync', note: 'no tuple allocated' },
+      { from: 'vc', to: 'tr', label: 'vectorcall(args*, n=2)', kind: 'sync', tooltip: 'the Python→C++ boundary' },
+      { from: 'tr', to: 'tr', label: 'PyLong_AsLong ×2', kind: 'self' },
+      { from: 'tr', to: 'add', label: 'add(3, 4)', kind: 'sync' },
+      { from: 'add', to: 'tr', label: '7', kind: 'reply' },
+      { from: 'tr', to: 'vc', label: 'PyLong_FromSsize_t(7)', kind: 'reply' },
+      { from: 'vc', to: 'eval', label: 'int(7)', kind: 'reply' },
+      { from: 'eval', to: 'user', label: '7', kind: 'reply' }
+    ],
+    frames: [
+      { kind: 'opt', label: 'fast path — METH_FASTCALL', from: 2, to: 7 }
+    ]
+  },
+  class: {
+    type: 'class',
+    title: 'pybind11 core objects',
+    classes: [
+      { id: 'PyObject', name: 'PyObject', stereotype: 'CPython', attributes: ['+ ob_refcnt', '+ ob_type'], tooltip: 'the C API substrate everything sits on' },
+      { id: 'module_', name: 'module_', methods: ['+ def(name, fn, doc)'], tooltip: 'wraps the Python module object' },
+      { id: 'cpp_function', name: 'cpp_function', methods: ['+ operator()(args)', '- initialize<F>(...)'], tooltip: 'builds the Python-callable + trampoline' },
+      { id: 'function_record', name: 'function_record', attributes: ['+ name: char*', '+ impl: void*  // &add', '+ next: function_record*'] },
+      { id: 'internals', name: 'internals', stereotype: 'singleton', attributes: ['+ registered_types_cpp', '+ registered_instances'], tooltip: 'process-wide registry in the interpreter state dict' }
+    ],
+    relations: [
+      { from: 'module_', to: 'PyObject', kind: 'inheritance' },
+      { from: 'cpp_function', to: 'PyObject', kind: 'inheritance' },
+      { from: 'function_record', to: 'cpp_function', kind: 'composition', toLabel: '1' },
+      { from: 'module_', to: 'cpp_function', kind: 'dependency', label: 'creates' },
+      { from: 'cpp_function', to: 'internals', kind: 'dependency', label: 'registers into' }
+    ]
+  }
+};
+function show(t) { window.postMessage({ type: 'render', diagram: samples[t] }, '*'); }
+addEventListener('load', () => {
+  const t = (location.hash || '#graph').slice(1);
+  setTimeout(() => show(samples[t] ? t : 'graph'), 50);
+});
+</script>
+</body>
+</html>
