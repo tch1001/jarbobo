@@ -463,7 +463,7 @@
             label: 'data(label)',
             color: FG,
             'font-size': 11,
-            'text-rotation': 'autorotate',
+            'text-rotation': 'none', // horizontal labels — slanted text is hard to read
             'text-background-color': BG,
             'text-background-opacity': 0.85,
             'text-background-padding': 2,
