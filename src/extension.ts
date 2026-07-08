@@ -224,7 +224,10 @@ async function onWebviewMessage(
         log(`open ref: target=${msg.target} panel.viewColumn=${String(panel.viewColumn)} panel.active=${panel.active} -> viewColumn=${viewColumn}`);
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
-            const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus: false });
+            // preview: true → italic "preview" tab: each ref click reuses the
+            // same slot instead of piling up tabs; editing/double-clicking
+            // promotes it to a permanent tab (standard VS Code semantics).
+            const editor = await vscode.window.showTextDocument(doc, { viewColumn, preserveFocus: false, preview: true });
             if (msg.line && msg.line > 0) {
                 const pos = new vscode.Position(msg.line - 1, 0);
                 editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
