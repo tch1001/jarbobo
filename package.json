@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "jarbobo",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tch1001/jarbobo.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
