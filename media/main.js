@@ -357,8 +357,14 @@
     }));
 
     const layoutName = d.layout || 'layered';
-    // a user-saved arrangement (drag & drop) takes precedence over the computed layout
-    const saved = d._layout && (d.nodes || []).every((n) => d._layout[n.id]) ? d._layout : null;
+    // A user-saved arrangement (drag & drop, possibly carried forward from a
+    // previous version by an LLM edit) takes precedence over the computed
+    // layout. It may be PARTIAL — new nodes added by an edit have no saved
+    // position — so unplaced nodes are slotted in near their connected,
+    // already-placed neighbors rather than discarding the arrangement.
+    const saved = d._layout && (d.nodes || []).some((n) => d._layout[n.id])
+      ? completePositions(d.nodes || [], d.edges || [], d._layout)
+      : null;
     const layout = saved
       ? { name: 'preset', positions: (n) => saved[n.id()], fit: true, padding: 24 }
       : layoutName === 'layered'
@@ -472,6 +478,41 @@
       },
       reset() { cy.fit(undefined, 30); },
     };
+  }
+
+  // Fill in positions for elements missing from a saved (partial) layout:
+  // average of already-placed neighbors plus an offset, else right of the
+  // arrangement's bounding box, staggered. `links` = [{a, b}] adjacency.
+  function completePositions(elements, links, saved) {
+    const pos = {};
+    elements.forEach((el) => {
+      if (saved[el.id]) { pos[el.id] = { x: saved[el.id].x, y: saved[el.id].y }; }
+    });
+    const neighbors = {};
+    (links || []).forEach((l) => {
+      const a = l.from ?? l.a, b = l.to ?? l.b;
+      (neighbors[a] = neighbors[a] || []).push(b);
+      (neighbors[b] = neighbors[b] || []).push(a);
+    });
+    let maxX = 0;
+    Object.values(pos).forEach((p) => { maxX = Math.max(maxX, p.x); });
+    let stagger = 0;
+    for (let pass = 0; pass < 3; pass++) {
+      elements.forEach((el) => {
+        if (pos[el.id]) { return; }
+        const placed = (neighbors[el.id] || []).map((id) => pos[id]).filter(Boolean);
+        if (placed.length) {
+          const ax = placed.reduce((s, p) => s + p.x, 0) / placed.length;
+          const ay = placed.reduce((s, p) => s + p.y, 0) / placed.length;
+          pos[el.id] = { x: ax + 60 + (stagger % 3) * 50, y: ay + 130 + Math.floor(stagger / 3) * 50 };
+          stagger++;
+        } else if (pass === 2) {
+          pos[el.id] = { x: maxX + 220, y: 80 + stagger * 100 };
+          stagger++;
+        }
+      });
+    }
+    return pos;
   }
 
   // ================================================================ helpers for SVG diagrams
@@ -743,10 +784,15 @@
       boxes[cl.id].x = n.x; boxes[cl.id].y = n.y;
     });
 
-    // user-saved arrangement (drag & drop) overrides the dagre layout
-    const savedPos = d._layout && classes.every((c) => d._layout[c.id]) ? d._layout : null;
+    // user-saved arrangement (drag & drop, possibly carried across an LLM
+    // edit) overrides the dagre layout; new classes slot in near neighbors
+    const savedPos = d._layout && classes.some((c) => d._layout[c.id])
+      ? completePositions(classes, rels, d._layout)
+      : null;
     if (savedPos) {
-      classes.forEach((cl) => { boxes[cl.id].x = savedPos[cl.id].x; boxes[cl.id].y = savedPos[cl.id].y; });
+      classes.forEach((cl) => {
+        if (savedPos[cl.id]) { boxes[cl.id].x = savedPos[cl.id].x; boxes[cl.id].y = savedPos[cl.id].y; }
+      });
     }
 
     let width = 300, height = 200;

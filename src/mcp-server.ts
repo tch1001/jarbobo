@@ -31,7 +31,7 @@ const interactiveProps = {
 };
 
 const idProp = {
-    id: z.string().optional().describe('To EDIT an existing diagram: pass its id (returned when it was created, or found via list_diagrams). The new content is saved as the next version and the diagram\'s existing tab updates in place — no new tab. Omit to create a new diagram in a new tab. Users asking for edits mean the LATEST version unless they name one.'),
+    id: z.string().optional().describe('To EDIT an existing diagram: pass its id (returned when it was created, or found via list_diagrams). The new content is saved as the next version and the diagram\'s existing tab updates in place — no new tab. The user\'s hand-arranged element positions carry forward automatically, keyed by element id — keep ids stable across edits. Omit to create a new diagram in a new tab. Users asking for edits mean the LATEST version unless they name one.'),
 };
 
 // ---------------------------------------------------------------- storage
@@ -100,6 +100,25 @@ async function deliver(diagram: Record<string, unknown>, editId?: string): Promi
         }
         id = editId;
         version = versions[versions.length - 1] + 1;
+        // The user's hand-arranged positions (saved into the version file when
+        // they drag nodes) carry forward to the edit, keyed by element id —
+        // this is why edits must keep ids stable. Positions for ids that no
+        // longer exist are dropped; brand-new elements get placed by the
+        // renderer near their connected neighbors.
+        const prevLayout = latest._layout as Record<string, unknown> | undefined;
+        if (prevLayout) {
+            const surviving = new Set(
+                (diagram.type === 'class'
+                    ? (diagram.classes as Array<{ id: string }> | undefined)
+                    : (diagram.nodes as Array<{ id: string }> | undefined)
+                )?.map(e => e.id) ?? [],
+            );
+            const carried: Record<string, unknown> = {};
+            for (const [nodeId, pos] of Object.entries(prevLayout)) {
+                if (surviving.has(nodeId)) { carried[nodeId] = pos; }
+            }
+            if (Object.keys(carried).length) { diagram = { ...diagram, _layout: carried }; }
+        }
     } else {
         id = slugify(String(diagram.title ?? 'diagram'));
         version = 1;
@@ -137,6 +156,7 @@ const server = new McpServer(
             'Jarbobo renders interactive diagrams inside the user\'s editor. ' +
             'A draw call WITHOUT `id` opens a new editor tab and returns the diagram\'s id; a draw call WITH `id` EDITS that diagram — it saves the content as the next version and updates the existing tab in place (the panel has a version picker, so old versions are never lost). ' +
             'Prefer editing over redrawing: when the user asks to tweak/extend/fix a diagram, pass its id back to the same draw tool with the full updated spec. Users mean the LATEST version unless they explicitly name one; use open_diagram to display an older version (it also returns that version\'s spec, which you can resubmit as an edit to roll back). Use list_diagrams to find ids from earlier sessions. ' +
+            'LAYOUT PRESERVATION: users often hand-arrange diagrams by dragging, and edits automatically carry that arrangement forward — but it is keyed by element id, so KEEP IDS STABLE across edits (renaming an id loses its position; genuinely new elements are placed near their connected neighbors automatically). Never invent coordinate fields — positions are not part of the tool schema and unknown fields are ignored. ' +
             'Make full use of interactivity instead of cramming text into the picture: keep on-diagram labels short; put one-liners in `tooltip` (hover); put paragraphs in `detail` (click opens a side panel); use `href` for docs/links. ' +
             'CODE REFERENCES: attach `file`+`line` to every element that corresponds to code you have seen, and ALWAYS explain the role of the referenced code in the tooltip or detail — what it is and what it does in this diagram\'s story (e.g. "the exec slot — runs the module body at import", "handler that receives the POST /diagram request"). A bare path with no explanation is not acceptable. ' +
             'User gestures worth mentioning when relevant: a plain click opens the detail panel (when `detail` is set); cmd/ctrl+click on any element opens its `file`+`line` code reference directly, bypassing the panel; holding Ctrl while hovering highlights the code reference in the tooltip. ' +
