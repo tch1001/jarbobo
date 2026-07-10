@@ -22,10 +22,23 @@ function log(msg: string) {
     logChannel?.appendLine(`[${new Date().toISOString()}] ${msg}`);
 }
 
-// Virtual one-line documents planted as navigation-history entries so that
-// Go Back from a jarbobo-opened ref returns to the diagram (see activate()).
-const ANCHOR_SCHEME = 'jarbobo-anchor';
-let anchorOpening = false;
+// Extensions have no real control over the navigation history (no read,
+// insert, or scoped-clear API), and webview tabs are never recorded in it —
+// so Go Back after a diagram ref-jump lands on stale pre-diagram code.
+// The pragmatic remedy (user-chosen): clear the editor history whenever a
+// diagram opens or gains focus, so Back simply no-ops instead of
+// teleporting somewhere confusing. Gated by jarbobo.clearHistoryOnOpen
+// (default true) because the only available command clears the WHOLE
+// history service, including Quick Open's recent-file ordering.
+let lastHistoryClearAt = 0;
+function maybeClearHistory() {
+    if (!vscode.workspace.getConfiguration('jarbobo').get<boolean>('clearHistoryOnOpen', true)) { return; }
+    const now = Date.now();
+    if (now - lastHistoryClearAt < 2000) { return; } // throttle rapid tab switches
+    lastHistoryClearAt = now;
+    vscode.commands.executeCommand('workbench.action.clearEditorHistory');
+    log('cleared editor history (jarbobo.clearHistoryOnOpen)');
+}
 
 function updateStatus() {
     if (!statusItem) { return; }
@@ -49,39 +62,6 @@ export function activate(context: vscode.ExtensionContext) {
     logChannel = vscode.window.createOutputChannel('Jarbobo');
     context.subscriptions.push(logChannel);
 
-    // ---- history anchors ----------------------------------------------
-    // Webview tabs never enter the editor navigation history (the history
-    // service records text-ish editors only), so Go Back from a ref opened
-    // out of a diagram would skip the diagram entirely and land on whatever
-    // code location preceded it. Before opening a ref we plant a tiny
-    // virtual "anchor" document as a history entry; the ref immediately
-    // replaces its preview tab, but the entry survives — and when Back
-    // re-activates the anchor, this listener closes it and focuses the
-    // diagram instead. Works for mouse buttons, keyboard and the GUI back
-    // button alike, since it fixes the history data rather than the input.
-    context.subscriptions.push(
-        vscode.workspace.registerTextDocumentContentProvider(ANCHOR_SCHEME, {
-            provideTextDocumentContent: (uri) => `↩ returning to "${uri.path.replace(/^\//, '')}" …`,
-        }),
-        vscode.window.onDidChangeActiveTextEditor(async (ed) => {
-            if (!ed || ed.document.uri.scheme !== ANCHOR_SCHEME || anchorOpening) { return; }
-            const id = ed.document.uri.query;
-            log(`anchor activated (id="${id}") — redirecting to diagram`);
-            try { await vscode.commands.executeCommand('workbench.action.closeActiveEditor'); } catch { /* best-effort */ }
-            for (const [p, dg] of panels) {
-                if (!id || (dg as Record<string, unknown> | undefined)?._id === id) {
-                    p.reveal(undefined, false);
-                    return;
-                }
-            }
-            if (id) {
-                const versions = listVersions(id);
-                if (versions.length) {
-                    createPanel(loadLineageVersion(id, versions[versions.length - 1]), true);
-                }
-            }
-        }),
-    );
 
     statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     statusItem.name = 'Jarbobo';
@@ -116,8 +96,7 @@ export function activate(context: vscode.ExtensionContext) {
         }),
         vscode.window.tabGroups.onDidChangeTabs((e) => {
             for (const tab of e.closed) {
-                const isJarbobo = (tab.input instanceof vscode.TabInputWebview && tab.input.viewType.includes('jarbobo'))
-                    || (tab.input instanceof vscode.TabInputText && tab.input.uri.scheme === ANCHOR_SCHEME);
+                const isJarbobo = tab.input instanceof vscode.TabInputWebview && tab.input.viewType.includes('jarbobo');
                 if (!isJarbobo) { lastOtherTabClosedAt = Date.now(); }
             }
         }),
@@ -248,7 +227,9 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
     // swimlane/timeline) aren't affected — the DOM repaints them normally.
     panel.onDidChangeViewState((e) => {
         if (e.webviewPanel.visible) { panel.webview.postMessage({ type: 'becameVisible' }); }
+        if (e.webviewPanel.active) { maybeClearHistory(); }
     });
+    maybeClearHistory(); // opening a diagram counts too
     updateStatus();
 }
 
@@ -297,24 +278,6 @@ async function onWebviewMessage(
             ? (panel.viewColumn ?? vscode.ViewColumn.Beside)
             : vscode.ViewColumn.One;
         log(`open ref: target=${msg.target} panel.viewColumn=${String(panel.viewColumn)} panel.active=${panel.active} -> viewColumn=${viewColumn}`);
-        // Plant the history anchor (see activate()); best-effort — if the
-        // entry doesn't survive, behavior degrades to the old skip-the-
-        // diagram Back, never anything worse.
-        try {
-            anchorOpening = true;
-            const dg = panels.get(panel) as Record<string, unknown> | undefined;
-            const anchorUri = vscode.Uri.from({
-                scheme: ANCHOR_SCHEME,
-                path: '/' + String(dg?.title ?? 'diagram').slice(0, 40),
-                query: (dg?._id as string | undefined) ?? '',
-            });
-            const anchorDoc = await vscode.workspace.openTextDocument(anchorUri);
-            await vscode.window.showTextDocument(anchorDoc, { viewColumn, preview: true, preserveFocus: false });
-        } catch (e) {
-            log(`anchor plant failed: ${e}`);
-        } finally {
-            anchorOpening = false;
-        }
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
             const target = msg.line && msg.line > 0
@@ -337,16 +300,6 @@ async function onWebviewMessage(
                 // centering only — scrolling doesn't move the cursor, so this
                 // adds no history entry
                 editor.revealRange(target, vscode.TextEditorRevealType.InCenter);
-            }
-            // With preview enabled the ref replaced the anchor's tab already;
-            // when the user has preview disabled the anchor lingers as a real
-            // tab — sweep any strays (their history entries survive closing).
-            for (const g of vscode.window.tabGroups.all) {
-                for (const t of g.tabs) {
-                    if (t.input instanceof vscode.TabInputText && t.input.uri.scheme === ANCHOR_SCHEME) {
-                        vscode.window.tabGroups.close(t);
-                    }
-                }
             }
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot open ${msg.file}: ${e}`);
