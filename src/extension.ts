@@ -200,6 +200,15 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
         updateStatus();
     });
     panel.webview.onDidReceiveMessage((msg) => onWebviewMessage(panel, msg));
+    // Graphs render on a <canvas> (cytoscape); its pixel buffer can be
+    // silently evicted by the GPU compositor while the panel is hidden
+    // (e.g. after clicking a node and switching away), and nothing repaints
+    // it automatically — the tab comes back visually black/blank until some
+    // incidental interaction forces a redraw. SVG diagrams (sequence/class/
+    // swimlane/timeline) aren't affected — the DOM repaints them normally.
+    panel.onDidChangeViewState((e) => {
+        if (e.webviewPanel.visible) { panel.webview.postMessage({ type: 'becameVisible' }); }
+    });
     updateStatus();
 }
 

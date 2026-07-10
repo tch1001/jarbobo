@@ -305,7 +305,20 @@
   window.addEventListener('message', (e) => {
     const msg = e.data;
     if (msg && msg.type === 'render' && msg.diagram) { render(msg.diagram); }
+    else if (msg && msg.type === 'becameVisible') { repaintCanvas(); }
   });
+
+  // The graph renderer's <canvas> (cytoscape) can go visually blank after
+  // the panel was hidden and shown again — the GPU-composited backing store
+  // gets evicted while hidden, and canvas content (unlike DOM/SVG) doesn't
+  // repaint itself. resize() + forceRender() repaints in place: no rebuild,
+  // no lost pan/zoom/selection. SVG diagram types are unaffected and skipped.
+  function repaintCanvas() {
+    if (window.__cy) {
+      window.__cy.resize();
+      window.__cy.forceRender();
+    }
+  }
 
   function render(d) {
     readTheme();
