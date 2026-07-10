@@ -51,17 +51,7 @@
         "id": "jarbobo.mcp-servers",
         "label": "Jarbobo"
       }
-    ],
-    "configuration": {
-      "title": "Jarbobo",
-      "properties": {
-        "jarbobo.clearHistoryOnOpen": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Clear the editor history whenever a Jarbobo diagram opens or gains focus. Why: diagram tabs are webviews, which the editor never records in its navigation history — so after clicking a code reference, *Go Back* would jump to a stale pre-diagram location instead of the diagram. Clearing makes *Go Back* simply do nothing in that case. **Trade-off:** the editor only offers an all-or-nothing clear, so this also resets *Go Forward* and the recent-file ordering in Quick Open. Turn this off if you rely heavily on navigation history."
-        }
-      }
-    }
+    ]
   },
   "scripts": {
     "compile": "tsc -p .",

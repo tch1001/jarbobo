@@ -22,24 +22,6 @@ function log(msg: string) {
     logChannel?.appendLine(`[${new Date().toISOString()}] ${msg}`);
 }
 
-// Extensions have no real control over the navigation history (no read,
-// insert, or scoped-clear API), and webview tabs are never recorded in it —
-// so Go Back after a diagram ref-jump lands on stale pre-diagram code.
-// The pragmatic remedy (user-chosen): clear the editor history whenever a
-// diagram opens or gains focus, so Back simply no-ops instead of
-// teleporting somewhere confusing. Gated by jarbobo.clearHistoryOnOpen
-// (default true) because the only available command clears the WHOLE
-// history service, including Quick Open's recent-file ordering.
-let lastHistoryClearAt = 0;
-function maybeClearHistory() {
-    if (!vscode.workspace.getConfiguration('jarbobo').get<boolean>('clearHistoryOnOpen', true)) { return; }
-    const now = Date.now();
-    if (now - lastHistoryClearAt < 2000) { return; } // throttle rapid tab switches
-    lastHistoryClearAt = now;
-    vscode.commands.executeCommand('workbench.action.clearEditorHistory');
-    log('cleared editor history (jarbobo.clearHistoryOnOpen)');
-}
-
 function updateStatus() {
     if (!statusItem) { return; }
     if (bridgeState === 'down') {
@@ -227,9 +209,7 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
     // swimlane/timeline) aren't affected — the DOM repaints them normally.
     panel.onDidChangeViewState((e) => {
         if (e.webviewPanel.visible) { panel.webview.postMessage({ type: 'becameVisible' }); }
-        if (e.webviewPanel.active) { maybeClearHistory(); }
     });
-    maybeClearHistory(); // opening a diagram counts too
     updateStatus();
 }
 
