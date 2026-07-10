@@ -294,9 +294,25 @@ async function onWebviewMessage(
     }
 }
 
+// Stock VS Code (appName "Visual Studio Code" / "...- Insiders") delivers
+// mouse buttons 4/5 to workbench.action.navigateBack/Forward NATIVELY even
+// from inside a webview (workbench.editor.mouseBackForwardToNavigate),
+// confirmed by field testing: with jarbobo's own mouse-button relay ALSO
+// active there, one physical click fired navigateBack twice. Cursor (and,
+// as far as we know, other forks) does not do this — for those the relay is
+// still the only way Go Back/Forward work from inside the diagram at all.
+// So: relay mouse buttons everywhere EXCEPT confirmed-native editors; keep
+// the keyboard-chord relay everywhere (no evidence of a native path for
+// those — chords are reliably swallowed by the webview iframe).
+function hasNativeWebviewMouseNav(): boolean {
+    return /^Visual Studio Code\b/.test(vscode.env.appName);
+}
+
 function buildHtml(webview: vscode.Webview): string {
     const nonce = crypto.randomBytes(16).toString('base64');
     const uri = (f: string) => webview.asWebviewUri(vscode.Uri.joinPath(extCtx.extensionUri, 'media', f));
+    const mouseRelay = !hasNativeWebviewMouseNav();
+    log(`buildHtml: appName="${vscode.env.appName}" -> mouseRelay=${mouseRelay}`);
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -305,6 +321,7 @@ function buildHtml(webview: vscode.Webview): string {
 <link rel="stylesheet" href="${uri('main.css')}">
 </head>
 <body>
+<script nonce="${nonce}">window.__jarboboMouseRelay = ${JSON.stringify(mouseRelay)};</script>
 <div id="titlebar">
   <span id="title"></span><span id="subtitle"></span>
   <span class="spacer"></span>

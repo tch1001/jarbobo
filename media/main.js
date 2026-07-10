@@ -1320,17 +1320,24 @@
 
   // ---------------------------------------------------------------- input relay
   // The webview is an iframe: mouse buttons 4/5 and some keybinding chords
-  // never reach the workbench from here. Relay them so Go Back / Go Forward
-  // work while the diagram has focus.
-  window.addEventListener('mouseup', (e) => {
-    if (e.button === 3) {
-      e.preventDefault();
-      vscodeApi.postMessage({ type: 'navigate', direction: 'back' });
-    } else if (e.button === 4) {
-      e.preventDefault();
-      vscodeApi.postMessage({ type: 'navigate', direction: 'forward' });
-    }
-  });
+  // never reach the workbench from here — relay them so Go Back / Go Forward
+  // work while the diagram has focus. EXCEPTION: stock VS Code delivers mouse
+  // buttons 4/5 to the workbench natively even from inside a webview
+  // (workbench.editor.mouseBackForwardToNavigate); relaying there too caused
+  // a single click to navigate back twice (field-confirmed). The extension
+  // sets window.__jarboboMouseRelay = false for editors with that native
+  // path; default true (relay) everywhere else, including this dev harness.
+  if (window.__jarboboMouseRelay !== false) {
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 3) {
+        e.preventDefault();
+        vscodeApi.postMessage({ type: 'navigate', direction: 'back' });
+      } else if (e.button === 4) {
+        e.preventDefault();
+        vscodeApi.postMessage({ type: 'navigate', direction: 'forward' });
+      }
+    });
+  }
   window.addEventListener('keydown', (e) => {
     // default macOS chords: ctrl+- = Go Back, ctrl+shift+- = Go Forward
     if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '-' || e.key === '_')) {
