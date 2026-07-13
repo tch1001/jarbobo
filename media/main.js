@@ -256,7 +256,10 @@
   function bindSvgItem(el, item, label, kind) {
     if (!item) { return; }
     el.addEventListener('mousemove', (e) => showItemTip(item, e.clientX, e.clientY, e.ctrlKey));
-    el.addEventListener('mouseleave', hideTip);
+    el.addEventListener('mouseenter', () => {
+      el.style.filter = 'drop-shadow(0 0 4px ' + (item.color || ACCENT) + ')';
+    });
+    el.addEventListener('mouseleave', () => { el.style.filter = ''; hideTip(); });
     el.addEventListener('click', (e) => {
       e.stopPropagation();
       interact(item, label, kind, { direct: e.metaKey || e.ctrlKey });
@@ -528,7 +531,24 @@
             'text-border-style': 'solid',
             'text-margin-x': 'data(mx)', // offset that slides the label along the edge
             'text-margin-y': 'data(my)',
+            'text-events': 'yes', // the label is part of the edge: hover shows the
+                                  // edge tooltip, ctrl/cmd-click opens its code ref
           },
+        },
+        // hover glow — a soft halo in the element's own color
+        {
+          selector: 'node.hoverglow',
+          style: { 'underlay-color': 'data(color)', 'underlay-padding': 7, 'underlay-opacity': 0.3, 'underlay-shape': 'round-rectangle' },
+        },
+        {
+          selector: 'edge.hoverglow',
+          style: { 'underlay-color': 'data(color)', 'underlay-padding': 5, 'underlay-opacity': 0.3 },
+        },
+        // hovering the LABEL itself: brighter border + opaque background, so it
+        // reads as "grabbable" (dragging here slides the label along the edge)
+        {
+          selector: 'edge.labelglow',
+          style: { 'text-border-width': 2.5, 'text-background-opacity': 1 },
         },
       ],
     });
@@ -539,8 +559,9 @@
       const oe = ev.originalEvent;
       showItemTip(ev.target.data('_item'), oe.clientX, oe.clientY, oe.ctrlKey);
     });
-    cy.on('mouseout', 'node, edge', hideTip);
+    cy.on('mouseout', 'node, edge', (ev) => { ev.target.removeClass('hoverglow'); hideTip(); });
     cy.on('mouseover', 'node, edge', (ev) => {
+      ev.target.addClass('hoverglow');
       const item = ev.target.data('_item');
       holder.style.cursor = isInteractive(item) ? 'pointer' : 'default';
     });
@@ -615,6 +636,19 @@
       });
       return hit;
     }
+    // Hovering the LABEL itself (not the edge line): glow the label and show a
+    // grab cursor, signalling that dragging here slides it along the edge. The
+    // edge tooltip/click come via text-events — the label counts as the edge.
+    let glowLabelEdge = null;
+    holder.addEventListener('mousemove', (me) => {
+      const edge = edgeLabelAt(me.clientX, me.clientY);
+      if (edge === glowLabelEdge) { return; }
+      if (glowLabelEdge) { glowLabelEdge.removeClass('labelglow'); }
+      glowLabelEdge = edge;
+      if (edge) { edge.addClass('labelglow'); holder.style.cursor = 'grab'; }
+      else { holder.style.cursor = 'default'; }
+    });
+
     // Capture phase so we can pre-empt cytoscape's pan/box-select when the press
     // lands on a label; a plain click (no drag) still opens the edge's detail.
     holder.addEventListener('mousedown', (down) => {
