@@ -180,6 +180,62 @@ function carryLayout(prevRaw: unknown, diagram: Record<string, unknown>): Record
     return { v: LAYOUT_V, nodes, edgeLabels };
 }
 
+// ---------------------------------------------------------------- ref anchors
+// At draw time, SNAPSHOT the text of each referenced line into the saved spec
+// (_anchor fields, added server-side after validation — invisible to the LLM).
+// When the user later edits a referenced file and line numbers drift, the
+// extension re-anchors: it finds the snapshotted first/last line texts nearest
+// their original positions and takes everything in between. Deliberately
+// simple — if the anchored lines themselves were rewritten, it falls back to
+// the saved numbers.
+function attachAnchors(diagram: Record<string, unknown>) {
+    const fileCache = new Map<string, string[] | null>();
+    const linesOf = (file: string): string[] | null => {
+        if (!fileCache.has(file)) {
+            try { fileCache.set(file, fs.readFileSync(file, 'utf8').split(/\r?\n/)); }
+            catch { fileCache.set(file, null); } // best-effort: file may not exist here
+        }
+        return fileCache.get(file) ?? null;
+    };
+    const at = (lines: string[], n: unknown): string | undefined => {
+        const i = Math.round(Number(n));
+        return Number.isFinite(i) && i >= 1 && i <= lines.length ? lines[i - 1] : undefined;
+    };
+    const anchorFor = (file: unknown, line: unknown, ranges: unknown): Record<string, unknown> | undefined => {
+        if (typeof file !== 'string') { return undefined; }
+        const lines = linesOf(file);
+        if (!lines) { return undefined; }
+        const a: Record<string, unknown> = {};
+        if (line !== undefined) {
+            const t = at(lines, line);
+            if (t !== undefined) { a.lineText = t; }
+        }
+        if (Array.isArray(ranges)) {
+            a.ranges = ranges.map((r) => {
+                const rr = r as { start?: unknown; end?: unknown };
+                return { startText: at(lines, rr.start), endText: at(lines, rr.end ?? rr.start) };
+            });
+        }
+        return Object.keys(a).length ? a : undefined;
+    };
+    const visit = (el: Record<string, unknown>) => {
+        if (Array.isArray(el.refs)) {
+            for (const r of el.refs as Array<Record<string, unknown>>) {
+                const a = anchorFor(r.file, r.line, r.ranges);
+                if (a) { r._anchor = a; }
+            }
+        }
+        if (typeof el.file === 'string') {
+            const a = anchorFor(el.file, el.line, undefined);
+            if (a) { el._anchor = a; }
+        }
+    };
+    for (const key of ['nodes', 'edges', 'groups', 'classes', 'relations', 'participants', 'messages', 'lanes', 'items', 'tracks']) {
+        const arr = diagram[key];
+        if (Array.isArray(arr)) { arr.forEach((el) => visit(el as Record<string, unknown>)); }
+    }
+}
+
 async function deliver(diagram: Record<string, unknown>, editId?: string, baseVersion?: number): Promise<Delivery> {
     let id: string;
     let version: number;
@@ -210,6 +266,7 @@ async function deliver(diagram: Record<string, unknown>, editId?: string, baseVe
         id = slugify(String(diagram.title ?? 'diagram'));
         version = 1;
     }
+    attachAnchors(diagram); // snapshot referenced line text for drift recovery
     fs.mkdirSync(lineageDir(id), { recursive: true });
     const file = path.join(lineageDir(id), `v${version}.json`);
     fs.writeFileSync(file, JSON.stringify(diagram, null, 2));

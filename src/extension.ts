@@ -224,7 +224,59 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
 
 // ---------------------------------------------------------------- code references
 type RefRange = { start: number; end?: number };
-type RefHighlight = { file?: string; ranges?: RefRange[] };
+type AnchorRange = { startText?: string; endText?: string };
+type RefAnchor = { lineText?: string; ranges?: AnchorRange[] };
+type RefHighlight = { file?: string; ranges?: RefRange[]; anchor?: RefAnchor };
+
+// ---- drift recovery. The MCP server snapshots the TEXT of referenced lines
+// into the spec at draw time (_anchor). Before jumping/highlighting/previewing
+// we re-anchor: if the saved line numbers no longer hold that text (the user
+// edited the file), find the snapshotted first/last line texts NEAREST their
+// original positions and take everything in between. Deliberately simple: when
+// the anchored lines themselves were rewritten, fall back to the saved numbers.
+function nearestMatch(lines: string[], text: string, origin: number): number | undefined {
+    const want = text.trim();
+    if (!want) { return undefined; } // blank lines match everywhere — useless anchors
+    let best: number | undefined;
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].trim() === want) {
+            if (best === undefined || Math.abs(i + 1 - origin) < Math.abs(best - origin)) { best = i + 1; }
+        }
+    }
+    return best;
+}
+// index-aligned with the ref's ranges array (the server anchors them in order)
+function reanchorRanges(lines: string[], ranges: RefRange[], anchor?: RefAnchor): RefRange[] {
+    return ranges.map((r, i) => {
+        const a = anchor?.ranges?.[i];
+        if (!a) { return r; }
+        const end0 = r.end ?? r.start;
+        const startHolds = a.startText !== undefined && lines[r.start - 1]?.trim() === a.startText.trim();
+        const endHolds = a.endText !== undefined && lines[end0 - 1]?.trim() === a.endText.trim();
+        if (startHolds && endHolds) { return r; }
+        const s = a.startText !== undefined ? nearestMatch(lines, a.startText, r.start) : undefined;
+        const e = a.endText !== undefined ? nearestMatch(lines, a.endText, end0) : undefined;
+        if (s !== undefined && e !== undefined && e >= s) { return { start: s, end: e }; }
+        if (s !== undefined) { return { start: s, end: s + (end0 - r.start) }; } // keep length
+        if (e !== undefined) { return { start: Math.max(1, e - (end0 - r.start)), end: e }; }
+        return r;
+    });
+}
+function reanchorLine(lines: string[], line: number, anchor?: RefAnchor): number {
+    if (!anchor?.lineText) { return line; }
+    if (lines[line - 1]?.trim() === anchor.lineText.trim()) { return line; }
+    return nearestMatch(lines, anchor.lineText, line) ?? line;
+}
+// a highlight entry synthesized from a bare `line` ref has one range but a
+// lineText anchor — re-anchor it as a line
+function reanchorHighlight(lines: string[], h: { ranges: RefRange[]; anchor?: RefAnchor }): RefRange[] {
+    if (h.anchor?.ranges?.length) { return reanchorRanges(lines, h.ranges, h.anchor); }
+    if (h.anchor?.lineText && h.ranges.length === 1 && h.ranges[0].end === undefined) {
+        const n = reanchorLine(lines, h.ranges[0].start, h.anchor);
+        return [{ start: n }];
+    }
+    return h.ranges;
+}
 
 // The ACTIVE HIGHLIGHT SET: every ref of the last-opened element, grouped by
 // file. Editors light up their file's ranges as the user visits them (a
@@ -232,7 +284,10 @@ type RefHighlight = { file?: string; ranges?: RefRange[] };
 // cursor moves, file switches, everything — until the user returns to any
 // jarbobo tab, which clears it.
 let refHighlight: vscode.TextEditorDecorationType | undefined;
-let activeHighlights: Map<string, RefRange[]> | undefined; // fsPath → ranges
+// fsPath → highlight entries (ranges + their text anchors). Re-anchored
+// against the CURRENT document text every time an editor is decorated, so
+// highlights stay on the right lines even after the file was edited.
+let activeHighlights: Map<string, Array<{ ranges: RefRange[]; anchor?: RefAnchor }>> | undefined;
 function decorationType(): vscode.TextEditorDecorationType {
     if (!refHighlight) {
         // deliberately loud: a yellow wash readable in both themes, so the
@@ -250,8 +305,10 @@ function decorationType(): vscode.TextEditorDecorationType {
     return refHighlight;
 }
 function decorateEditor(editor: vscode.TextEditor) {
-    const ranges = activeHighlights?.get(editor.document.uri.fsPath);
-    if (!ranges) { return; }
+    const entries = activeHighlights?.get(editor.document.uri.fsPath);
+    if (!entries) { return; }
+    const lines = editor.document.getText().split(/\r?\n/);
+    const ranges = entries.flatMap((h) => reanchorHighlight(lines, h));
     const max = editor.document.lineCount;
     editor.setDecorations(decorationType(), ranges.map((r) => {
         const s = Math.min(Math.max(1, Math.round(r.start)), max) - 1;
@@ -265,7 +322,8 @@ function setRefHighlights(highlights: RefHighlight[]) {
     for (const h of highlights) {
         if (!h.file || !h.ranges?.length) { continue; }
         const key = vscode.Uri.file(h.file).fsPath;
-        activeHighlights.set(key, [...(activeHighlights.get(key) ?? []), ...h.ranges]);
+        const entry = { ranges: h.ranges, anchor: h.anchor };
+        activeHighlights.set(key, [...(activeHighlights.get(key) ?? []), entry]);
     }
     vscode.window.visibleTextEditors.forEach(decorateEditor);
 }
@@ -293,12 +351,18 @@ const LANG_BY_EXT: Record<string, string> = {
 };
 const SNIPPET_MAX_LINES = 120;
 const SNIPPET_CONTEXT = 2; // context lines around each referenced range
-function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
+async function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[]; _anchor?: RefAnchor }) {
     try {
         if (!r.file) { throw new Error('missing file'); }
-        const all = fs.readFileSync(r.file, 'utf8').split(/\r?\n/);
+        // openTextDocument (not fs) so unsaved edits are previewed too
+        const doc = await vscode.workspace.openTextDocument(r.file);
+        const all = doc.getText().split(/\r?\n/);
         const clamp = (n: number) => Math.min(Math.max(1, Math.round(n)), all.length);
-        const ranges = (r.ranges ?? [])
+        // drift recovery BEFORE clamp/sort (anchors are index-aligned with the
+        // ref's ranges as written)
+        const anchored = reanchorRanges(all, r.ranges ?? [], r._anchor);
+        const line = r.line !== undefined ? reanchorLine(all, r.line, r._anchor) : undefined;
+        const ranges = anchored
             .map((x) => ({ start: clamp(x.start), end: clamp(x.end ?? x.start) }))
             .map((x) => (x.end < x.start ? { start: x.end, end: x.start } : x))
             .sort((a, b) => a.start - b.start);
@@ -317,7 +381,7 @@ function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
             end: Math.min(all.length, x.end + SNIPPET_CONTEXT),
         }));
         if (!padded.length) {
-            const ln = clamp(r.line ?? 1);
+            const ln = clamp(line ?? 1);
             padded = [{ start: Math.max(1, ln - 3), end: Math.min(all.length, ln + 3) }];
         }
         const merged: typeof padded = [];
@@ -335,7 +399,7 @@ function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
             budget -= take;
         }
         const ext = (r.file.split('.').pop() ?? '').toLowerCase();
-        return { ok: true, lang: LANG_BY_EXT[ext] ?? ext, focusLine: r.line ?? merged[0]?.start, chunks, refRanges };
+        return { ok: true, lang: LANG_BY_EXT[ext] ?? ext, focusLine: line ?? merged[0]?.start, chunks, refRanges };
     } catch (e) {
         return { ok: false, err: String((e as Error)?.message ?? e) };
     }
@@ -343,7 +407,7 @@ function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
 
 async function onWebviewMessage(
     panel: vscode.WebviewPanel,
-    msg: { type: string; file?: string; line?: number; ranges?: RefRange[]; highlights?: RefHighlight[]; url?: string; target?: string; positions?: unknown; id?: string; version?: number; direction?: string; reqId?: number; refs?: Array<{ file?: string; line?: number; ranges?: RefRange[] }> },
+    msg: { type: string; file?: string; line?: number; ranges?: RefRange[]; anchor?: RefAnchor; highlights?: RefHighlight[]; url?: string; target?: string; positions?: unknown; id?: string; version?: number; direction?: string; reqId?: number; refs?: Array<{ file?: string; line?: number; ranges?: RefRange[]; _anchor?: RefAnchor }> },
 ) {
     if (msg.type === 'ready') {
         const diagram = panels.get(panel);
@@ -388,8 +452,13 @@ async function onWebviewMessage(
         log(`open ref: target=${msg.target} panel.viewColumn=${String(panel.viewColumn)} panel.active=${panel.active} -> viewColumn=${viewColumn}`);
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
+            // drift recovery: re-anchor the jump target against the current text
+            const docLines = doc.getText().split(/\r?\n/);
+            const anchoredRanges = msg.ranges?.length ? reanchorRanges(docLines, msg.ranges, msg.anchor) : undefined;
             // cursor lands on `line`, falling back to the first highlighted range
-            const primaryLine = (msg.line && msg.line > 0) ? msg.line : msg.ranges?.[0]?.start;
+            const primaryLine = (msg.line && msg.line > 0)
+                ? reanchorLine(docLines, msg.line, msg.anchor)
+                : anchoredRanges?.[0]?.start;
             const target = primaryLine && primaryLine > 0
                 ? new vscode.Range(new vscode.Position(primaryLine - 1, 0), new vscode.Position(primaryLine - 1, 0))
                 : undefined;
@@ -423,7 +492,8 @@ async function onWebviewMessage(
         }
     } else if (msg.type === 'snippets' && Array.isArray(msg.refs)) {
         // detail panel asks for the referenced code to render inline
-        panel.webview.postMessage({ type: 'snippets', reqId: msg.reqId, results: msg.refs.map(readSnippet) });
+        const results = await Promise.all(msg.refs.map(readSnippet));
+        panel.webview.postMessage({ type: 'snippets', reqId: msg.reqId, results });
     } else if (msg.type === 'loadVersion' && msg.id && typeof msg.version === 'number') {
         // user picked a version in the panel's version dropdown
         try {

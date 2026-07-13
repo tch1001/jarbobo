@@ -116,7 +116,8 @@
   function getRefs(item) {
     if (!item) { return []; }
     if (Array.isArray(item.refs) && item.refs.length) { return item.refs.filter((r) => r && r.file); }
-    return item.file ? [{ file: item.file, line: item.line }] : [];
+    // legacy single-ref shorthand; _anchor is the server's text snapshot for drift recovery
+    return item.file ? [{ file: item.file, line: item.line, _anchor: item._anchor }] : [];
   }
   function refLine(r) { return r.line || (r.ranges && r.ranges.length ? r.ranges[0].start : 0); }
   // compact location: ranges as "245-252,260-262" (single-line ranges collapse
@@ -136,8 +137,9 @@
     const hl = (all && all.length ? all : [r]).map((x) => ({
       file: x.file,
       ranges: x.ranges && x.ranges.length ? x.ranges : (x.line ? [{ start: x.line }] : []),
+      anchor: x._anchor, // text snapshot: highlights re-anchor if the file drifted
     })).filter((x) => x.ranges.length);
-    vscodeApi.postMessage({ type: 'open', file: r.file, line: r.line, ranges: r.ranges, highlights: hl, target: openTarget });
+    vscodeApi.postMessage({ type: 'open', file: r.file, line: r.line, ranges: r.ranges, anchor: r._anchor, highlights: hl, target: openTarget });
   }
 
   let hoverRef = null; // {item, x, y} while a tooltip is visible — lets Ctrl re-style it live
