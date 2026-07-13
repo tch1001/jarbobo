@@ -249,6 +249,12 @@ const server = new McpServer(
             'MULTIPLE REFERENCES + LINE HIGHLIGHTING: an element can carry `refs`, an ORDERED list of references (most important first), each with an optional `label` (2-3 word role), `note` (one-sentence explanation) and `ranges` — line ranges highlighted in the editor when the reference opens; disjoint ranges are fine. Keep ranges TIGHT: for functions cover the SIGNATURE only, never the body. ' +
             'EDGE REFS have two idioms: (1) multiple CALL SITES of the same call, one ref per site; (2) a COLLAPSED CALL CHAIN — when a→b actually flows through intermediate calls not worth drawing as nodes, put one ref per hop in EXECUTION ORDER with a label/note narrating each hop. Ctrl/cmd+click jumps to the first ref but highlights EVERY ref\'s ranges, and the highlights persist while the user explores the files (cleared when they return to the diagram) — so a well-built chain lets the user walk the whole path with everything lit up. Plain click opens a panel showing every reference\'s actual code from disk, syntax-highlighted — never paste code excerpts into `detail`; use `refs` with tight ranges and spend `detail` on explanation. ' +
             'User gestures worth mentioning when relevant: a plain click opens the detail panel (when `detail` is set); cmd/ctrl+click on any element opens its `file`+`line` code reference directly, bypassing the panel; holding Ctrl while hovering highlights the code reference in the tooltip. ' +
+            'SEMANTIC SCHEMAS (suggestions, not rules — use one when it fits the question, mix or go free-form when it does not; whatever you choose, keep the MEANING of refs consistent within one diagram): ' +
+            '• FUNCTIONAL (call graph): nodes = function definitions (ref = the signature); edges = calls, suggested arrows caller→callee; edge refs = the call sites (one ref per site) or a collapsed call chain. ' +
+            '• STATE TRANSITION: nodes = states (ref = the state\'s declaration — enum variant, constant, class); edges = transitions, suggested arrows source→target, and draw ONE ARROW PER DISTINCT TRANSITION — never merge transitions that fire for different reasons, even between the same two states; edge refs = the chain of events that drives the transition, in execution order; labels are semantic (trigger/guard). ' +
+            '• SHARED STATE: nodes = the writing code and the reading code (writer refs = the modification sites, reader refs = the read sites); edges writer→reader (data-flow direction suggested); the edge ref = the DECLARATION of the shared variable; labels semantic. ' +
+            '• PUB-SUB: nodes = publishing code → subscribing code (subscriber refs = the callback and/or its registration, or the polling site); the edge ref = the queue/topic declaration; suggested arrows publisher→subscriber. ' +
+            '• RESOURCE LIFECYCLE: nodes = resources (ref = the resource\'s type/declaration) and the code that owns them; edges = acquire/release/transfer, each edge ref\'ing the site(s) where it happens. ' +
             'Prefer two or three focused diagrams over one overloaded one.',
     },
 );
@@ -265,7 +271,8 @@ server.registerTool(
             'Layouts: "layered" (default; hierarchical, follows `direction` TB or LR — best for flows and layers), "force" (organic clusters), "grid", "circle". ' +
             'Nodes support shapes (box, ellipse, diamond=decision, hexagon, cylinder=storage), hex colors, and grouping into labelled containers (`group` + top-level `groups`) — use groups for boundaries like "CPython interpreter" vs "your .so", processes, or layers. ' +
             'Edges support labels, styles (solid, dashed, dotted), arrowheads (triangle, open, none) and colors — e.g. dashed+open for indirect/async relations, red for error paths. ' +
-            'EVERY node and edge is interactive: `tooltip` (hover), `detail` (click → side panel), `file`+`line` (click → opens source in the editor), `href` (click → opens URL). Use these aggressively: short labels on the diagram, explanation in tooltip/detail, and source locations (with their role explained) on anything that corresponds to code.',
+            'EVERY node and edge is interactive: `tooltip` (hover), `detail` (click → side panel), `file`+`line` (click → opens source in the editor), `href` (click → opens URL). Use these aggressively: short labels on the diagram, explanation in tooltip/detail, and source locations (with their role explained) on anything that corresponds to code. ' +
+            'Consider the semantic schemas from the server instructions (functional / state transition / shared state / pub-sub / resource lifecycle) — they define what node and edge refs should point at for common diagram intents; they are suggestions, not requirements.',
         inputSchema: {
             ...idProp,
             title: z.string().describe('Diagram title shown in the panel header.'),
@@ -308,6 +315,8 @@ server.registerTool(
             if (n.group && !groupIds.has(n.group)) { problems.push(`node "${n.id}" references unknown group "${n.group}"`); }
         }
         checkRefs('node(s)', spec.nodes.map(n => ({ name: n.id, ...n })), problems);
+        // edges carry meaning too (call sites, transitions, medium declarations)
+        checkRefs('edge(s)', (spec.edges ?? []).map(e => ({ name: `${e.from}→${e.to}${e.label ? ` (${e.label})` : ''}`, ...e })), problems);
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'graph', ...spec }, id, baseVersion);
@@ -427,6 +436,7 @@ server.registerTool(
             if (!ids.has(r.to)) { problems.push(`relation references unknown class id "${r.to}"`); }
         }
         checkRefs('class(es)', spec.classes.map(c => ({ name: c.id, ...c })), problems);
+        checkRefs('relation(s)', (spec.relations ?? []).map(r => ({ name: `${r.from}→${r.to} (${r.kind})`, ...r })), problems);
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'class', ...spec }, id, baseVersion);
@@ -490,6 +500,7 @@ server.registerTool(
             if (!nodeIds.has(e.to)) { problems.push(`edge references unknown node id "${e.to}"`); }
         }
         checkRefs('step(s)', spec.nodes.map(n => ({ name: n.id, ...n })), problems);
+        checkRefs('edge(s)', (spec.edges ?? []).map(e => ({ name: `${e.from}→${e.to}${e.label ? ` (${e.label})` : ''}`, ...e })), problems);
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'swimlane', ...spec }, id, baseVersion);
