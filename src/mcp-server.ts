@@ -28,12 +28,47 @@ const interactiveProps = {
     file: z.string().optional().describe('Absolute path to a source file. Clicking the element (or its "Go to source" button) opens this file in the editor. Attach these aggressively to anything that corresponds to code, and ALWAYS pair with a tooltip/detail explaining the role of the referenced code.'),
     line: z.number().int().optional().describe('1-based line number to jump to within `file`.'),
     href: z.string().optional().describe('URL opened in the browser on click (docs, PRs, dashboards). Shown as a button if `detail` is also set.'),
+    noRef: z.boolean().optional().describe('Set true to explicitly declare that this element has NO corresponding source location (an external system, a human actor, an abstract concept). Only use it when a code reference genuinely does not exist — never to save the effort of finding one.'),
 };
 
 const idProp = {
     id: z.string().optional().describe('To EDIT an existing diagram: pass its id (returned when it was created, or found via list_diagrams). The new content is saved as the next version and the diagram\'s existing tab updates in place — no new tab. The user\'s hand-arranged element positions carry forward automatically, keyed by element id — keep ids stable across edits. Omit to create a new diagram in a new tab. Users asking for edits mean the LATEST version unless they name one.'),
     baseVersion: z.number().int().optional().describe('Only with `id`: carry the hand-arranged layout from THIS version instead of the latest one. Use when the user asks to edit starting from an older version (e.g. "go back to v6 and add X" → open_diagram(id, 6) for the content, then resubmit with baseVersion: 6). Content always comes from the spec you submit; baseVersion only selects which version\'s arrangement is inherited.'),
 };
+
+// ---------------------------------------------------------------- code-reference policy
+// Diagrams are most useful when every element that corresponds to code carries
+// a clickable file+line. Draw calls are rejected (with a fixable message) when
+// primary elements lack a reference AND lack an explicit noRef opt-out.
+// Users doing non-coding work can turn the check off in ~/.jarbobo/config.json:
+//   { "requireCodeReferences": false }
+// Read per call, so toggling it doesn't require restarting the MCP server.
+function requireRefs(): boolean {
+    try {
+        const cfg = JSON.parse(fs.readFileSync(path.join(HOME, 'config.json'), 'utf8'));
+        if (typeof cfg.requireCodeReferences === 'boolean') { return cfg.requireCodeReferences; }
+    } catch { /* missing/invalid config → default */ }
+    return true;
+}
+
+type RefLike = { file?: string; href?: string; noRef?: boolean };
+function checkRefs(
+    kind: string,
+    elements: Array<{ name: string } & RefLike>,
+    problems: string[],
+    opts?: { hrefCounts?: boolean },
+) {
+    if (!requireRefs()) { return; }
+    const missing = elements.filter(el => !el.file && !el.noRef && !(opts?.hrefCounts && el.href));
+    if (!missing.length) { return; }
+    problems.push(
+        `${missing.length} ${kind} without a code reference: ${missing.map(el => `"${el.name}"`).join(', ')}. ` +
+        'Clicking an element jumps to its source — file+line references are what make jarbobo diagrams useful. ' +
+        'Attach file+line to every element that corresponds to code you have seen (and explain its role in tooltip/detail). ' +
+        'If an element genuinely has no source location (external system, human actor, abstract concept), set noRef: true on it. ' +
+        '(The user can disable this check via ~/.jarbobo/config.json {"requireCodeReferences": false}.)',
+    );
+}
 
 // ---------------------------------------------------------------- storage
 
@@ -199,7 +234,7 @@ const server = new McpServer(
             'Prefer editing over redrawing: when the user asks to tweak/extend/fix a diagram, pass its id back to the same draw tool with the full updated spec. Users mean the LATEST version unless they explicitly name one; use open_diagram to display an older version (it also returns that version\'s spec, which you can resubmit as an edit to roll back — pass baseVersion: N as well so that version\'s hand-arranged layout is inherited instead of the latest one\'s). Use list_diagrams to find ids from earlier sessions. ' +
             'LAYOUT PRESERVATION: users often hand-arrange diagrams by dragging, and edits automatically carry that arrangement forward — but it is keyed by element id, so KEEP IDS STABLE across edits (renaming an id loses its position; genuinely new elements are placed near their connected neighbors automatically). Never invent coordinate fields — positions are not part of the tool schema and unknown fields are ignored. ' +
             'Make full use of interactivity instead of cramming text into the picture: keep on-diagram labels short; put one-liners in `tooltip` (hover); put paragraphs in `detail` (click opens a side panel); use `href` for docs/links. ' +
-            'CODE REFERENCES: attach `file`+`line` to every element that corresponds to code you have seen, and ALWAYS explain the role of the referenced code in the tooltip or detail — what it is and what it does in this diagram\'s story (e.g. "the exec slot — runs the module body at import", "handler that receives the POST /diagram request"). A bare path with no explanation is not acceptable. ' +
+            'CODE REFERENCES ARE REQUIRED: attach `file`+`line` to every element that corresponds to code you have seen, and ALWAYS explain the role of the referenced code in the tooltip or detail — what it is and what it does in this diagram\'s story (e.g. "the exec slot — runs the module body at import", "handler that receives the POST /diagram request"). A bare path with no explanation is not acceptable. Draw calls are REJECTED when primary elements (graph nodes, sequence messages, classes, swimlane steps, timeline items) lack both a reference and an explicit opt-out — set `noRef: true` only on elements that genuinely have no source location (external systems, human actors, abstract concepts), never to save effort. ' +
             'User gestures worth mentioning when relevant: a plain click opens the detail panel (when `detail` is set); cmd/ctrl+click on any element opens its `file`+`line` code reference directly, bypassing the panel; holding Ctrl while hovering highlights the code reference in the tooltip. ' +
             'Prefer two or three focused diagrams over one overloaded one.',
     },
@@ -259,6 +294,7 @@ server.registerTool(
         for (const n of spec.nodes) {
             if (n.group && !groupIds.has(n.group)) { problems.push(`node "${n.id}" references unknown group "${n.group}"`); }
         }
+        checkRefs('node(s)', spec.nodes.map(n => ({ name: n.id, ...n })), problems);
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'graph', ...spec }, id, baseVersion);
@@ -321,6 +357,8 @@ server.registerTool(
                 problems.push(`frame "${f.kind}" has invalid range ${f.from}..${f.to} (messages: 0..${spec.messages.length - 1})`);
             }
         }
+        // each message is a call/return — the single most ref-able thing here
+        checkRefs('message(s)', spec.messages.map((m, i) => ({ name: `${i}: ${m.label}`, ...m })), problems);
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'sequence', ...spec }, id, baseVersion);
@@ -375,6 +413,7 @@ server.registerTool(
             if (!ids.has(r.from)) { problems.push(`relation references unknown class id "${r.from}"`); }
             if (!ids.has(r.to)) { problems.push(`relation references unknown class id "${r.to}"`); }
         }
+        checkRefs('class(es)', spec.classes.map(c => ({ name: c.id, ...c })), problems);
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'class', ...spec }, id, baseVersion);
@@ -437,6 +476,7 @@ server.registerTool(
             if (!nodeIds.has(e.from)) { problems.push(`edge references unknown node id "${e.from}"`); }
             if (!nodeIds.has(e.to)) { problems.push(`edge references unknown node id "${e.to}"`); }
         }
+        checkRefs('step(s)', spec.nodes.map(n => ({ name: n.id, ...n })), problems);
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'swimlane', ...spec }, id, baseVersion);
@@ -490,6 +530,9 @@ server.registerTool(
                 else if (!trackIds.has(it.track)) { problems.push(`item "${it.id}" references unknown track "${it.track}"`); }
             }
         }
+        // timeline items often map to releases/tags, not source lines — an href
+        // (changelog, tag, PR) satisfies the reference requirement here
+        checkRefs('item(s)', spec.items.map(it => ({ name: it.id, ...it })), problems, { hrefCounts: true });
         if (problems.length) { return fail(problems); }
         try {
             const d = await deliver({ type: 'timeline', ...spec }, id, baseVersion);

@@ -256,8 +256,10 @@
   function bindSvgItem(el, item, label, kind) {
     if (!item) { return; }
     el.addEventListener('mousemove', (e) => showItemTip(item, e.clientX, e.clientY, e.ctrlKey));
+    // glow applies to node/edge-like elements only, not group containers
+    const glows = kind !== 'lane' && kind !== 'track';
     el.addEventListener('mouseenter', () => {
-      el.style.filter = 'drop-shadow(0 0 4px ' + (item.color || ACCENT) + ')';
+      if (glows) { el.style.filter = 'drop-shadow(0 0 4px ' + (item.color || ACCENT) + ')'; }
     });
     el.addEventListener('mouseleave', () => { el.style.filter = ''; hideTip(); });
     el.addEventListener('click', (e) => {
@@ -561,7 +563,8 @@
     });
     cy.on('mouseout', 'node, edge', (ev) => { ev.target.removeClass('hoverglow'); hideTip(); });
     cy.on('mouseover', 'node, edge', (ev) => {
-      ev.target.addClass('hoverglow');
+      // group containers don't glow — only nodes, edges and edge labels do
+      if (ev.target.isEdge() || !ev.target.isParent()) { ev.target.addClass('hoverglow'); }
       const item = ev.target.data('_item');
       holder.style.cursor = isInteractive(item) ? 'pointer' : 'default';
     });

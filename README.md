@@ -63,6 +63,17 @@ lets you flip back to any older version; nothing is ever overwritten.
 Validation is strict (unknown node ids, bad frame ranges → the tool call fails with a fixable
 message), so the LLM can't silently draw a broken picture.
 
+**Code references are required by default.** A draw call is rejected when primary elements
+(graph nodes, sequence messages, classes, swimlane steps, timeline items) carry neither a
+`file`+`line` reference nor an explicit `noRef: true` opt-out — the rejection message tells
+the LLM exactly which elements to fix, so it corrects itself in one round trip. Using jarbobo
+for non-coding diagrams? Turn the check off:
+
+```jsonc
+// ~/.jarbobo/config.json
+{ "requireCodeReferences": false }
+```
+
 ## Quick start
 
 ```bash
