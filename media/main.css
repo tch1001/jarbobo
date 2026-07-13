@@ -119,6 +119,8 @@ svg text { user-select: none; }
 }
 .refLine .lc { flex: 1; padding-right: 8px; }
 .refLine.focus { background: color-mix(in srgb, var(--vscode-charts-blue, #569cd6) 14%, transparent); }
+/* referenced-range lines: same yellow wash + left border as the editor decoration */
+.refLine.hl { background: rgba(255, 213, 0, 0.16); box-shadow: inset 3px 0 0 rgba(255, 213, 0, 0.85); }
 .refGap { text-align: center; opacity: .4; user-select: none; line-height: 1.2; }
 
 /* theme-adaptive syntax colors (highlight.js token classes) */

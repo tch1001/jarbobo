@@ -12,17 +12,31 @@
           if (m.type === 'snippets') {
             setTimeout(() => window.postMessage({
               type: 'snippets', reqId: m.reqId,
-              results: m.refs.map((r) => ({
-                ok: true, lang: 'javascript', focusLine: r.line ?? (r.ranges && r.ranges[0].start) ?? 1,
-                chunks: (r.ranges && r.ranges.length ? r.ranges : [{ start: (r.line || 3) - 2, end: (r.line || 3) + 2 }])
-                  .map((rg) => ({
+              results: m.refs.map((r) => {
+                // mirror readSnippet: referenced ranges + 2 lines of context
+                // around each (merged when the padding makes them touch)
+                const refRanges = (r.ranges || []).map((rg) => ({ start: rg.start, end: rg.end || rg.start }));
+                const padded = refRanges.length
+                  ? refRanges.map((rg) => ({ start: Math.max(1, rg.start - 2), end: rg.end + 2 }))
+                  : [{ start: Math.max(1, (r.line || 4) - 3), end: (r.line || 4) + 3 }];
+                const merged = [];
+                padded.forEach((rg) => {
+                  const last = merged[merged.length - 1];
+                  if (last && rg.start <= last.end + 1) { last.end = Math.max(last.end, rg.end); }
+                  else { merged.push({ start: rg.start, end: rg.end }); }
+                });
+                return {
+                  ok: true, lang: 'javascript', focusLine: r.line ?? (refRanges[0] && refRanges[0].start) ?? 1,
+                  refRanges,
+                  chunks: merged.map((rg) => ({
                     start: rg.start,
-                    text: Array.from({ length: (rg.end || rg.start) - rg.start + 1 },
+                    text: Array.from({ length: rg.end - rg.start + 1 },
                       (_, i) => (rg.start + i) % 3 === 0
                         ? '  return demo(' + (rg.start + i) + '); // ' + r.file.split('/').pop()
                         : 'function line' + (rg.start + i) + '(x) { /* dev */ }').join('\n'),
                   })),
-              })),
+                };
+              }),
             }, '*'), 60);
           }
         },
@@ -105,7 +119,15 @@
     return item.file ? [{ file: item.file, line: item.line }] : [];
   }
   function refLine(r) { return r.line || (r.ranges && r.ranges.length ? r.ranges[0].start : 0); }
-  function refDisplay(r) { const ln = refLine(r); return r.file + (ln ? ':' + ln : ''); }
+  // compact location: ranges as "245-252,260-262" (single-line ranges collapse
+  // to one number), else the bare `line`
+  function refLoc(r) {
+    if (r.ranges && r.ranges.length) {
+      return r.ranges.map((rg) => rg.end && rg.end !== rg.start ? rg.start + '-' + rg.end : String(rg.start)).join(',');
+    }
+    return r.line ? String(r.line) : '';
+  }
+  function refDisplay(r) { const loc = refLoc(r); return r.file + (loc ? ':' + loc : ''); }
   // Open reference r in the editor. `all` (optional) is the element's FULL ref
   // list: every ref's ranges become the active highlight set — the editor
   // highlights each referenced file as the user visits it, persisting until
@@ -190,6 +212,10 @@
       pre.classList.add('err');
       return;
     }
+    // referenced lines get the editor's yellow wash; the focus tint only
+    // applies when the ref has no ranges (bare `line` + context)
+    const refRanges = res.refRanges || [];
+    const inRef = (n) => refRanges.some((rg) => n >= rg.start && n <= (rg.end || rg.start));
     (res.chunks || []).forEach((ch, idx) => {
       if (idx) {
         const gap = document.createElement('div');
@@ -198,9 +224,10 @@
         pre.appendChild(gap);
       }
       highlightLines(ch.text, res.lang).forEach((lineHtml, j) => {
+        const n = ch.start + j;
         const row = document.createElement('div');
-        row.className = 'refLine' + (ch.start + j === res.focusLine ? ' focus' : '');
-        row.innerHTML = '<span class="ln">' + (ch.start + j) + '</span><span class="lc">' + (lineHtml || '&nbsp;') + '</span>';
+        row.className = 'refLine' + (inRef(n) ? ' hl' : (!refRanges.length && n === res.focusLine ? ' focus' : ''));
+        row.innerHTML = '<span class="ln">' + n + '</span><span class="lc">' + (lineHtml || '&nbsp;') + '</span>';
         pre.appendChild(row);
       });
     });
@@ -223,9 +250,9 @@
         div.className = 'refItem';
         const head = document.createElement('button');
         head.className = 'refHead';
-        const ln = refLine(r);
+        const loc = refLoc(r);
         head.innerHTML = (r.label ? '<span class="refRole">' + escHtml(r.label) + '</span>' : '')
-          + '<span class="refLoc">' + escHtml((r.file.split('/').pop() || r.file) + (ln ? ':' + ln : '')) + '</span>'
+          + '<span class="refLoc">' + escHtml((r.file.split('/').pop() || r.file) + (loc ? ':' + loc : '')) + '</span>'
           + '<span class="refGo">↗</span>';
         head.title = 'Open ' + refDisplay(r);
         head.onclick = () => openRef(r); // just THIS hop's highlight

@@ -278,8 +278,9 @@ function clearRefHighlights() {
 }
 
 // Extract the referenced lines from disk for the detail panel's code preview.
-// `ranges` are shown verbatim (merged when overlapping); a bare `line` gets a
-// few lines of context around it.
+// `ranges` get a couple of lines of context around them (the merged referenced
+// ranges are reported back as `refRanges` so the webview can highlight them
+// within that context); a bare `line` gets a few lines of context around it.
 const LANG_BY_EXT: Record<string, string> = {
     ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
     js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
@@ -291,21 +292,36 @@ const LANG_BY_EXT: Record<string, string> = {
     md: 'markdown', sql: 'sql', lua: 'lua', pl: 'perl', dart: 'dart', scala: 'scala',
 };
 const SNIPPET_MAX_LINES = 120;
+const SNIPPET_CONTEXT = 2; // context lines around each referenced range
 function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
     try {
         if (!r.file) { throw new Error('missing file'); }
         const all = fs.readFileSync(r.file, 'utf8').split(/\r?\n/);
         const clamp = (n: number) => Math.min(Math.max(1, Math.round(n)), all.length);
-        let ranges = (r.ranges ?? [])
+        const ranges = (r.ranges ?? [])
             .map((x) => ({ start: clamp(x.start), end: clamp(x.end ?? x.start) }))
             .map((x) => (x.end < x.start ? { start: x.end, end: x.start } : x))
             .sort((a, b) => a.start - b.start);
-        if (!ranges.length) {
-            const ln = clamp(r.line ?? 1);
-            ranges = [{ start: Math.max(1, ln - 3), end: Math.min(all.length, ln + 3) }];
-        }
-        const merged: typeof ranges = [];
+        // the merged REFERENCED ranges — reported to the webview so it can mark
+        // these lines within the padded context
+        const refRanges: typeof ranges = [];
         for (const x of ranges) {
+            const last = refRanges[refRanges.length - 1];
+            if (last && x.start <= last.end + 1) { last.end = Math.max(last.end, x.end); }
+            else { refRanges.push({ ...x }); }
+        }
+        // chunks = referenced ranges padded with context (re-merged where the
+        // padding makes them touch); a bare `line` keeps its ±3 window
+        let padded = refRanges.map((x) => ({
+            start: Math.max(1, x.start - SNIPPET_CONTEXT),
+            end: Math.min(all.length, x.end + SNIPPET_CONTEXT),
+        }));
+        if (!padded.length) {
+            const ln = clamp(r.line ?? 1);
+            padded = [{ start: Math.max(1, ln - 3), end: Math.min(all.length, ln + 3) }];
+        }
+        const merged: typeof padded = [];
+        for (const x of padded) {
             const last = merged[merged.length - 1];
             if (last && x.start <= last.end + 1) { last.end = Math.max(last.end, x.end); }
             else { merged.push({ ...x }); }
@@ -319,7 +335,7 @@ function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
             budget -= take;
         }
         const ext = (r.file.split('.').pop() ?? '').toLowerCase();
-        return { ok: true, lang: LANG_BY_EXT[ext] ?? ext, focusLine: r.line ?? merged[0]?.start, chunks };
+        return { ok: true, lang: LANG_BY_EXT[ext] ?? ext, focusLine: r.line ?? merged[0]?.start, chunks, refRanges };
     } catch (e) {
         return { ok: false, err: String((e as Error)?.message ?? e) };
     }
