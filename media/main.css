@@ -106,8 +106,12 @@ svg text { user-select: none; }
 .refHead .refRole { font-weight: 600; }
 .refHead .refLoc { font-family: Menlo, Consolas, monospace; opacity: .85; }
 .refHead .refGo { margin-left: auto; opacity: .7; }
+/* No horizontal scrolling: long lines WRAP (continuations align after the
+   gutter, since .lc is the flex child that wraps). With overflow-x, a
+   highlighted row's background only spanned the visible width — scrolling
+   right showed highlighted code with no highlight. */
 #detail pre.refCode {
-  white-space: pre; overflow-x: auto; margin: 0; padding: 6px 0;
+  white-space: normal; overflow-x: hidden; margin: 0; padding: 6px 0;
   font-family: Menlo, Consolas, monospace; font-size: 11px; line-height: 1.45;
   background: var(--vscode-editor-background, #1e1e1e);
 }
@@ -117,7 +121,7 @@ svg text { user-select: none; }
   flex: 0 0 34px; text-align: right; padding-right: 8px; user-select: none;
   opacity: .4; font-size: 10px; line-height: inherit;
 }
-.refLine .lc { flex: 1; padding-right: 8px; }
+.refLine .lc { flex: 1; padding-right: 8px; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .refLine.focus { background: color-mix(in srgb, var(--vscode-charts-blue, #569cd6) 14%, transparent); }
 /* referenced-range lines: same yellow wash + left border as the editor decoration */
 .refLine.hl { background: rgba(255, 213, 0, 0.16); box-shadow: inset 3px 0 0 rgba(255, 213, 0, 0.85); }
