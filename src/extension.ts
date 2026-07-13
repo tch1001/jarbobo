@@ -82,14 +82,11 @@ export function activate(context: vscode.ExtensionContext) {
                 if (!isJarbobo) { lastOtherTabClosedAt = Date.now(); }
             }
         }),
-        // Ref-range highlights behave like the editor's own "range highlight":
-        // they vanish once the user moves the cursor. The grace window skips
-        // the selection event fired by our own jump.
-        vscode.window.onDidChangeTextEditorSelection((e) => {
-            if (refHighlight && decoratedEditor === e.textEditor && Date.now() - lastHighlightAt > 1500) {
-                e.textEditor.setDecorations(refHighlight, []);
-                decoratedEditor = undefined;
-            }
+        // Files from the active highlight set light up as their editors become
+        // visible — so a cross-file call chain shows its ranges in every file
+        // the user navigates to, not just the first one opened.
+        vscode.window.onDidChangeVisibleTextEditors((editors) => {
+            if (activeHighlights) { editors.forEach(decorateEditor); }
         }),
         vscode.commands.registerCommand('jarbobo.reopenClosed', () => {
             const d = closedStack.pop();
@@ -218,19 +215,25 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
     // swimlane/timeline) aren't affected — the DOM repaints them normally.
     panel.onDidChangeViewState((e) => {
         if (e.webviewPanel.visible) { panel.webview.postMessage({ type: 'becameVisible' }); }
+        // returning to any jarbobo tab ends the code-trail exploration:
+        // clear the persistent ref highlights
+        if (e.webviewPanel.active) { clearRefHighlights(); }
     });
     updateStatus();
 }
 
 // ---------------------------------------------------------------- code references
 type RefRange = { start: number; end?: number };
+type RefHighlight = { file?: string; ranges?: RefRange[] };
 
-// Highlight the referenced line ranges (disjoint is fine) in the opened editor,
-// like a multi-range "go to" — cleared when the user moves the cursor.
+// The ACTIVE HIGHLIGHT SET: every ref of the last-opened element, grouped by
+// file. Editors light up their file's ranges as the user visits them (a
+// collapsed call chain lights up hop by hop) and the set persists — through
+// cursor moves, file switches, everything — until the user returns to any
+// jarbobo tab, which clears it.
 let refHighlight: vscode.TextEditorDecorationType | undefined;
-let decoratedEditor: vscode.TextEditor | undefined;
-let lastHighlightAt = 0;
-function applyRefHighlights(editor: vscode.TextEditor, ranges: RefRange[]) {
+let activeHighlights: Map<string, RefRange[]> | undefined; // fsPath → ranges
+function decorationType(): vscode.TextEditorDecorationType {
     if (!refHighlight) {
         refHighlight = vscode.window.createTextEditorDecorationType({
             backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'),
@@ -239,17 +242,34 @@ function applyRefHighlights(editor: vscode.TextEditor, ranges: RefRange[]) {
             overviewRulerLane: vscode.OverviewRulerLane.Full,
         });
     }
-    if (decoratedEditor && decoratedEditor !== editor) {
-        try { decoratedEditor.setDecorations(refHighlight, []); } catch { /* editor may be gone */ }
-    }
-    decoratedEditor = editor;
-    lastHighlightAt = Date.now();
+    return refHighlight;
+}
+function decorateEditor(editor: vscode.TextEditor) {
+    const ranges = activeHighlights?.get(editor.document.uri.fsPath);
+    if (!ranges) { return; }
     const max = editor.document.lineCount;
-    editor.setDecorations(refHighlight, ranges.map((r) => {
+    editor.setDecorations(decorationType(), ranges.map((r) => {
         const s = Math.min(Math.max(1, Math.round(r.start)), max) - 1;
         const e = Math.min(Math.max(r.start, Math.round(r.end ?? r.start)), max) - 1;
         return new vscode.Range(s, 0, Math.max(s, e), Number.MAX_SAFE_INTEGER);
     }));
+}
+function setRefHighlights(highlights: RefHighlight[]) {
+    clearRefHighlights();
+    activeHighlights = new Map();
+    for (const h of highlights) {
+        if (!h.file || !h.ranges?.length) { continue; }
+        const key = vscode.Uri.file(h.file).fsPath;
+        activeHighlights.set(key, [...(activeHighlights.get(key) ?? []), ...h.ranges]);
+    }
+    vscode.window.visibleTextEditors.forEach(decorateEditor);
+}
+function clearRefHighlights() {
+    if (!activeHighlights) { return; }
+    activeHighlights = undefined;
+    if (refHighlight) {
+        vscode.window.visibleTextEditors.forEach((ed) => ed.setDecorations(refHighlight!, []));
+    }
 }
 
 // Extract the referenced lines from disk for the detail panel's code preview.
@@ -302,7 +322,7 @@ function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
 
 async function onWebviewMessage(
     panel: vscode.WebviewPanel,
-    msg: { type: string; file?: string; line?: number; ranges?: RefRange[]; url?: string; target?: string; positions?: unknown; id?: string; version?: number; direction?: string; reqId?: number; refs?: Array<{ file?: string; line?: number; ranges?: RefRange[] }> },
+    msg: { type: string; file?: string; line?: number; ranges?: RefRange[]; highlights?: RefHighlight[]; url?: string; target?: string; positions?: unknown; id?: string; version?: number; direction?: string; reqId?: number; refs?: Array<{ file?: string; line?: number; ranges?: RefRange[] }> },
 ) {
     if (msg.type === 'ready') {
         const diagram = panels.get(panel);
@@ -370,7 +390,13 @@ async function onWebviewMessage(
                 // adds no history entry
                 editor.revealRange(target, vscode.TextEditorRevealType.InCenter);
             }
-            if (msg.ranges?.length) { applyRefHighlights(editor, msg.ranges); }
+            if (msg.highlights?.length) {
+                setRefHighlights(msg.highlights);
+            } else if (msg.ranges?.length) {
+                // older webview payloads: highlight just the opened file's ranges
+                setRefHighlights([{ file: msg.file, ranges: msg.ranges }]);
+            }
+            decorateEditor(editor);
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot open ${msg.file}: ${e}`);
         }

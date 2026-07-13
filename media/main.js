@@ -106,8 +106,16 @@
   }
   function refLine(r) { return r.line || (r.ranges && r.ranges.length ? r.ranges[0].start : 0); }
   function refDisplay(r) { const ln = refLine(r); return r.file + (ln ? ':' + ln : ''); }
-  function openRef(r) {
-    vscodeApi.postMessage({ type: 'open', file: r.file, line: r.line, ranges: r.ranges, target: openTarget });
+  // Open reference r in the editor. `all` (optional) is the element's FULL ref
+  // list: every ref's ranges become the active highlight set — the editor
+  // highlights each referenced file as the user visits it, persisting until
+  // they return to a jarbobo tab. A ref without ranges highlights its line.
+  function openRef(r, all) {
+    const hl = (all && all.length ? all : [r]).map((x) => ({
+      file: x.file,
+      ranges: x.ranges && x.ranges.length ? x.ranges : (x.line ? [{ start: x.line }] : []),
+    })).filter((x) => x.ranges.length);
+    vscodeApi.postMessage({ type: 'open', file: r.file, line: r.line, ranges: r.ranges, highlights: hl, target: openTarget });
   }
 
   let hoverRef = null; // {item, x, y} while a tooltip is visible — lets Ctrl re-style it live
@@ -220,8 +228,14 @@
           + '<span class="refLoc">' + escHtml((r.file.split('/').pop() || r.file) + (ln ? ':' + ln : '')) + '</span>'
           + '<span class="refGo">↗</span>';
         head.title = 'Open ' + refDisplay(r);
-        head.onclick = () => openRef(r);
+        head.onclick = () => openRef(r); // just THIS hop's highlight
         div.appendChild(head);
+        if (r.note) {
+          const note = document.createElement('div');
+          note.className = 'refNote';
+          note.textContent = r.note;
+          div.appendChild(note);
+        }
         const pre = document.createElement('pre');
         pre.className = 'refCode';
         pre.id = 'snip-' + reqId + '-' + i;
@@ -238,7 +252,7 @@
       const ln = refLine(refs[0]);
       b.textContent = 'Go to source' + (ln ? ` :${ln}` : '');
       b.title = refDisplay(refs[0]);
-      b.onclick = () => openRef(refs[0]);
+      b.onclick = () => openRef(refs[0], refs); // primary jump = full highlight set
       actions.appendChild(b);
     }
     if (item.href) {
@@ -365,13 +379,15 @@
     if (!item || suppressClick) { return; }
     const refs = getRefs(item);
     if (opts && opts.direct) {
-      // cmd/ctrl+click: straight to the PRIMARY (first) reference
-      if (refs.length) { openRef(refs[0]); return; }
+      // cmd/ctrl+click: jump to the PRIMARY (first) reference, but highlight
+      // EVERY ref's ranges — a collapsed call chain lights up hop by hop as
+      // the user follows it through the files
+      if (refs.length) { openRef(refs[0], refs); return; }
       if (item.href) { vscodeApi.postMessage({ type: 'openUrl', url: item.href }); return; }
     }
     if (item.detail) { openDetail(item, label, kind); }
     else if (refs.length > 1) { openDetail(item, label, kind); } // several refs → panel lists them all
-    else if (refs.length) { openRef(refs[0]); }
+    else if (refs.length) { openRef(refs[0], refs); }
     else if (item.href) { vscodeApi.postMessage({ type: 'openUrl', url: item.href }); }
     else if (item.tooltip) { openDetail(item, label, kind); }
   }

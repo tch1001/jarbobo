@@ -74,7 +74,7 @@ const samples = {
       { id: 'slot', label: 'function_record\n(&add stored)', group: 'so', shape: 'cylinder', color: '#ce9178', tooltip: 'data slot holding the C++ function pointer' },
       { id: 'tramp', label: 'trampoline __invoke', group: 'so', tooltip: 'unpacks Python args → C ints, wraps result', detail: 'The generated trampoline: casts PyObject* args to C++ ints, calls add, wraps the result.', refs: [
         { file: '/Users/fish/exploring-pybind11/example.cpp', line: 3, ranges: [{ start: 1, end: 4 }], label: 'definition' },
-        { file: '/Users/fish/pybind11/include/pybind11/pybind11.h', line: 250, ranges: [{ start: 245, end: 252 }, { start: 260, end: 262 }], label: 'call site' }
+        { file: '/Users/fish/pybind11/include/pybind11/pybind11.h', line: 250, ranges: [{ start: 245, end: 252 }, { start: 260, end: 262 }], label: 'call site', note: 'The dispatcher loads the stored function pointer and invokes it with the unpacked args.' }
       ] },
       { id: 'add', label: 'add(int, int)', group: 'so', color: '#4ec9b0', tooltip: 'add w0, w1, w0 ; ret', file: '/Users/fish/exploring-pybind11/example.cpp', line: 3 }
     ],
