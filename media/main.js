@@ -41,6 +41,31 @@
   const MONO_FONT = '12px Menlo, Consolas, monospace';
   function tw(text, font) { mctx.font = font || SMALL_FONT; return mctx.measureText(text || '').width; }
 
+  // ---------------------------------------------------------------- layout format
+  // The saved arrangement (_layout) is a *versioned, namespaced envelope* so
+  // that future additions never break older builds:
+  //     { v: 2, nodes: { id: {x,y} }, edgeLabels: { key: {t} } }
+  // Rules that keep it forward/backward compatible:
+  //   • Readers only touch the sub-keys they understand and ignore the rest —
+  //     so a file written by a NEWER build (with extra keys) still loads here.
+  //   • New data goes under a fresh sub-key; existing keys keep their meaning,
+  //     so we bump `v` only for a genuinely breaking change.
+  //   • Legacy saves were a bare { id:{x,y} } map (no `v`); normalizeLayout
+  //     upgrades those in memory, so old diagrams keep their positions.
+  const LAYOUT_V = 2;
+  // Edge-label positions are keyed by a stable identity (endpoints + label),
+  // not by array index, so a saved position survives edits that reorder or
+  // insert edges. JSON.stringify gives an unambiguous, printable key.
+  const edgeKey = (from, to, label) => JSON.stringify([from || '', to || '', label || '']);
+  function normalizeLayout(raw) {
+    if (!raw || typeof raw !== 'object') { return null; }
+    if (typeof raw.v === 'number' && raw.nodes && typeof raw.nodes === 'object') {
+      return { v: raw.v, nodes: raw.nodes, edgeLabels: raw.edgeLabels || {} };
+    }
+    return { v: LAYOUT_V, nodes: raw, edgeLabels: {} }; // legacy flat map
+  }
+  const emptyLayout = () => ({ v: LAYOUT_V, nodes: {}, edgeLabels: {} });
+
   // ---------------------------------------------------------------- tooltip + detail panel
 
   function escHtml(s) {
@@ -188,20 +213,23 @@
           const p = n.position();
           positions[n.id()] = { x: p.y, y: p.x };
         });
-        cy.nodes().forEach((n) => {
-          if (!n.isParent() && positions[n.id()]) { n.position(positions[n.id()]); }
-        });
-        cy.fit(undefined, 30);
-        currentDiagram._layout = positions;
-        vscodeApi.postMessage({ type: 'layout', positions });
+        // t along an edge is orientation-independent, so transposing the nodes
+        // keeps label placements valid — carry edgeLabels through unchanged.
+        const prev = normalizeLayout(currentDiagram._layout) || emptyLayout();
+        const env = { v: LAYOUT_V, nodes: positions, edgeLabels: prev.edgeLabels || {} };
+        currentDiagram._layout = env;
+        vscodeApi.postMessage({ type: 'layout', positions: env });
         vscodeApi.setState({ diagram: currentDiagram });
+        render(currentDiagram); // re-render so the preset layout + label offsets follow
       } else if (currentDiagram.type === 'class' && lastClassPositions) {
         const positions = {};
         for (const id in lastClassPositions) {
           positions[id] = { x: lastClassPositions[id].y, y: lastClassPositions[id].x };
         }
-        currentDiagram._layout = positions;
-        vscodeApi.postMessage({ type: 'layout', positions });
+        const prev = normalizeLayout(currentDiagram._layout) || emptyLayout();
+        const env = { v: LAYOUT_V, nodes: positions, edgeLabels: prev.edgeLabels || {} };
+        currentDiagram._layout = env;
+        vscodeApi.postMessage({ type: 'layout', positions: env });
         render(currentDiagram);
       }
     });
@@ -402,9 +430,10 @@
     (d.edges || []).forEach((e, i) => els.push({
       data: {
         id: '__e' + i, source: e.from, target: e.to, label: e.label || '',
+        ekey: edgeKey(e.from, e.to, e.label || ''),
         lstyle: e.style || 'solid',
         arrow: e.arrow === 'open' ? 'vee' : e.arrow === 'none' ? 'none' : 'triangle',
-        color: e.color || MUTED, _item: e,
+        color: e.color || MUTED, _item: e, mx: 0, my: 0,
       },
     }));
 
@@ -414,8 +443,10 @@
     // layout. It may be PARTIAL — new nodes added by an edit have no saved
     // position — so unplaced nodes are slotted in near their connected,
     // already-placed neighbors rather than discarding the arrangement.
-    const saved = d._layout && (d.nodes || []).some((n) => d._layout[n.id])
-      ? completePositions(d.nodes || [], d.edges || [], d._layout)
+    const savedLayout = normalizeLayout(d._layout);
+    const savedNodes = savedLayout && savedLayout.nodes;
+    const saved = savedNodes && (d.nodes || []).some((n) => savedNodes[n.id])
+      ? completePositions(d.nodes || [], d.edges || [], savedNodes)
       : null;
     const layout = saved
       ? { name: 'preset', positions: (n) => saved[n.id()], fit: true, padding: 24 }
@@ -449,7 +480,10 @@
         },
         // scoped so compound parents (no shape/w data) don't trigger mapping warnings
         { selector: 'node[shape]', style: { shape: 'data(shape)' } },
-        { selector: 'node[w]', style: { width: 'data(w)', height: 'data(h)' } },
+        // Wrap the label to the node's own measured width so short labels like
+        // "bank tile (C)" don't spill past the box border (the global 150px cap
+        // let text overrun narrow nodes).
+        { selector: 'node[w]', style: { width: 'data(w)', height: 'data(h)', 'text-max-width': 'data(w)' } },
         {
           selector: ':parent',
           style: {
@@ -482,9 +516,18 @@
             color: FG,
             'font-size': 11,
             'text-rotation': 'none', // horizontal labels — slanted text is hard to read
+            'text-wrap': 'wrap',        // long labels wrap instead of overrunning
+            'text-max-width': 150,
             'text-background-color': BG,
-            'text-background-opacity': 0.85,
-            'text-background-padding': 2,
+            'text-background-opacity': 0.9,
+            'text-background-padding': 3,
+            'text-background-shape': 'roundrectangle',
+            'text-border-color': 'data(color)', // boundary matches the edge/arrow color
+            'text-border-width': 1,
+            'text-border-opacity': 1,
+            'text-border-style': 'solid',
+            'text-margin-x': 'data(mx)', // offset that slides the label along the edge
+            'text-margin-y': 'data(my)',
           },
         },
       ],
@@ -508,16 +551,100 @@
         { direct: !!(oe.metaKey || oe.ctrlKey) });
     });
 
-    // persist the arrangement whenever the user finishes dragging a node
-    cy.on('dragfree', 'node', () => {
-      const positions = {};
-      cy.nodes().forEach((n) => {
-        if (!n.isParent()) { positions[n.id()] = { x: n.position('x'), y: n.position('y') }; }
-      });
-      d._layout = positions;
-      vscodeApi.postMessage({ type: 'layout', positions });
+    // Live, mutable copy of the saved arrangement. We seed edgeLabels from the
+    // saved layout and rewrite the whole envelope on every persist, so node
+    // drags and label drags never clobber each other's data.
+    const layoutState = { v: LAYOUT_V, nodes: {}, edgeLabels: { ...((savedLayout && savedLayout.edgeLabels) || {}) } };
+
+    function persistLayout() {
+      const nodes = {};
+      cy.nodes().forEach((n) => { if (!n.isParent()) { nodes[n.id()] = { x: n.position('x'), y: n.position('y') }; } });
+      layoutState.nodes = nodes;
+      d._layout = layoutState;
+      vscodeApi.postMessage({ type: 'layout', positions: layoutState });
       vscodeApi.setState({ diagram: d });
-    });
+    }
+
+    // Place each edge's label at its saved fraction `t` along the straight
+    // source→target line (default 0.5 = midpoint). Expressed as a text-margin
+    // offset from the midpoint, recomputed whenever endpoints move.
+    function applyEdgeLabelOffsets() {
+      cy.edges().forEach((e) => {
+        const rec = layoutState.edgeLabels[e.data('ekey')];
+        const t = rec && typeof rec.t === 'number' ? rec.t : 0.5;
+        const s = e.source().position(), tp = e.target().position();
+        e.data('mx', (t - 0.5) * (tp.x - s.x));
+        e.data('my', (t - 0.5) * (tp.y - s.y));
+      });
+    }
+    cy.ready(() => applyEdgeLabelOffsets());
+    cy.on('layoutstop', applyEdgeLabelOffsets);
+    cy.on('drag', 'node', applyEdgeLabelOffsets); // keep labels on their line while a node moves
+
+    // persist the arrangement whenever the user finishes dragging a node
+    cy.on('dragfree', 'node', () => { applyEdgeLabelOffsets(); persistLayout(); });
+
+    // ---- drag an edge label along its edge -----------------------------
+    const LFONT = '11px -apple-system, sans-serif';
+    function edgeLabelBox(e) {
+      const text = e.data('label');
+      if (!text) { return null; }
+      let w = 0, lines = 0;
+      String(text).split('\n').forEach((ln) => {
+        const lw = tw(ln, LFONT);
+        w = Math.max(w, Math.min(lw, 150));
+        lines += Math.max(1, Math.ceil(lw / 150));
+      });
+      return { w: w + 8, h: lines * 13 + 6 }; // model-space px (font-size is a model unit)
+    }
+    function labelCenterModel(e) {
+      const s = e.source().position(), tp = e.target().position();
+      return { x: (s.x + tp.x) / 2 + e.data('mx'), y: (s.y + tp.y) / 2 + e.data('my') };
+    }
+    function clientToModel(cx, cy2) {
+      const r = holder.getBoundingClientRect(), z = cy.zoom(), pan = cy.pan();
+      return { x: (cx - r.left - pan.x) / z, y: (cy2 - r.top - pan.y) / z };
+    }
+    function edgeLabelAt(cx, cy2) {
+      const m = clientToModel(cx, cy2);
+      let hit = null;
+      cy.edges().forEach((e) => {
+        const box = edgeLabelBox(e); if (!box) { return; }
+        const c = labelCenterModel(e);
+        if (Math.abs(m.x - c.x) <= box.w / 2 + 2 && Math.abs(m.y - c.y) <= box.h / 2 + 2) { hit = e; }
+      });
+      return hit;
+    }
+    // Capture phase so we can pre-empt cytoscape's pan/box-select when the press
+    // lands on a label; a plain click (no drag) still opens the edge's detail.
+    holder.addEventListener('mousedown', (down) => {
+      if (down.button !== 0) { return; }
+      const edge = edgeLabelAt(down.clientX, down.clientY);
+      if (!edge) { return; }
+      down.stopPropagation(); down.preventDefault();
+      holder.style.cursor = 'grabbing';
+      let moved = false;
+      const move = (me) => {
+        moved = true;
+        const m = clientToModel(me.clientX, me.clientY);
+        const s = edge.source().position(), tp = edge.target().position();
+        const dx = tp.x - s.x, dy = tp.y - s.y, len2 = dx * dx + dy * dy;
+        let t = len2 ? ((m.x - s.x) * dx + (m.y - s.y) * dy) / len2 : 0.5;
+        t = Math.max(0.04, Math.min(0.96, t));
+        edge.data('mx', (t - 0.5) * dx);
+        edge.data('my', (t - 0.5) * dy);
+        layoutState.edgeLabels[edge.data('ekey')] = { t };
+      };
+      const up = (ue) => {
+        window.removeEventListener('mousemove', move, true);
+        window.removeEventListener('mouseup', up, true);
+        holder.style.cursor = 'default';
+        if (moved) { persistLayout(); }
+        else { interact(edge.data('_item'), edge.data('label'), 'edge', { direct: !!(ue.metaKey || ue.ctrlKey) }); }
+      };
+      window.addEventListener('mousemove', move, true);
+      window.addEventListener('mouseup', up, true);
+    }, true);
 
     activeOps = {
       pan(dx, dy) { cy.panBy({ x: dx, y: dy }); },
@@ -863,8 +990,10 @@
 
     // user-saved arrangement (drag & drop, possibly carried across an LLM
     // edit) overrides the dagre layout; new classes slot in near neighbors
-    const savedPos = d._layout && classes.some((c) => d._layout[c.id])
-      ? completePositions(classes, rels, d._layout)
+    const savedClassLayout = normalizeLayout(d._layout);
+    const savedClassNodes = savedClassLayout && savedClassLayout.nodes;
+    const savedPos = savedClassNodes && classes.some((c) => savedClassNodes[c.id])
+      ? completePositions(classes, rels, savedClassNodes)
       : null;
     if (savedPos) {
       classes.forEach((cl) => {
@@ -1021,8 +1150,10 @@
           setTimeout(() => { suppressClick = false; }, 150);
           const positions = {};
           classes.forEach((c) => { positions[c.id] = { x: boxes[c.id].x, y: boxes[c.id].y }; });
-          d._layout = positions;
-          vscodeApi.postMessage({ type: 'layout', positions });
+          const prev = normalizeLayout(d._layout) || emptyLayout();
+          const env = { v: LAYOUT_V, nodes: positions, edgeLabels: prev.edgeLabels || {} };
+          d._layout = env;
+          vscodeApi.postMessage({ type: 'layout', positions: env });
           const vpState = activeOps && activeOps.getState ? activeOps.getState() : null;
           render(d); // clean redraw so relation labels and sizing follow
           if (vpState && activeOps && activeOps.setState) { activeOps.setState(vpState); }

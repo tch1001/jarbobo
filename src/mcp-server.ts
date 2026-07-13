@@ -87,6 +87,53 @@ function withMeta(diagram: Record<string, unknown>, id: string, version: number)
     return { ...diagram, _id: id, _version: version, _versions: listVersions(id), _file: path.join(lineageDir(id), `v${version}.json`) };
 }
 
+// ---------------------------------------------------------------- layout carry
+// The saved arrangement (_layout) is a versioned, namespaced envelope:
+//   { v, nodes: { id:{x,y} }, edgeLabels: { key:{t} } }
+// Legacy saves were a bare { id:{x,y} } map. We read both, and only ever write
+// the envelope. This must stay in lockstep with normalizeLayout()/edgeKey() in
+// media/main.js — the renderer and this carry-forward share the same format.
+const LAYOUT_V = 2;
+// Stable edge identity — matches the renderer's edgeKey exactly.
+const edgeKey = (from: unknown, to: unknown, label: unknown) =>
+    JSON.stringify([from || '', to || '', label || '']);
+
+type LayoutEnvelope = { nodes: Record<string, unknown>; edgeLabels: Record<string, unknown> };
+function normalizeLayout(raw: unknown): LayoutEnvelope | null {
+    if (!raw || typeof raw !== 'object') { return null; }
+    const o = raw as Record<string, unknown>;
+    if (typeof o.v === 'number' && o.nodes && typeof o.nodes === 'object') {
+        return { nodes: o.nodes as Record<string, unknown>, edgeLabels: (o.edgeLabels as Record<string, unknown>) || {} };
+    }
+    return { nodes: o, edgeLabels: {} }; // legacy flat map
+}
+
+// Carry a prior arrangement onto an edit: keep positions/labels only for
+// elements that still exist (keyed by id / stable edge identity), drop the
+// rest, and return the envelope (or undefined if nothing survives).
+function carryLayout(prevRaw: unknown, diagram: Record<string, unknown>): Record<string, unknown> | undefined {
+    const prev = normalizeLayout(prevRaw);
+    if (!prev) { return undefined; }
+    const survivingNodes = new Set(
+        (diagram.type === 'class'
+            ? (diagram.classes as Array<{ id: string }> | undefined)
+            : (diagram.nodes as Array<{ id: string }> | undefined)
+        )?.map(e => e.id) ?? [],
+    );
+    const nodes: Record<string, unknown> = {};
+    for (const [id, pos] of Object.entries(prev.nodes)) {
+        if (survivingNodes.has(id)) { nodes[id] = pos; }
+    }
+    const edges = (diagram.edges ?? diagram.relations) as Array<{ from: unknown; to: unknown; label?: unknown }> | undefined;
+    const survivingEdges = new Set((edges ?? []).map(e => edgeKey(e.from, e.to, e.label ?? '')));
+    const edgeLabels: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(prev.edgeLabels)) {
+        if (survivingEdges.has(k)) { edgeLabels[k] = v; }
+    }
+    if (!Object.keys(nodes).length && !Object.keys(edgeLabels).length) { return undefined; }
+    return { v: LAYOUT_V, nodes, edgeLabels };
+}
+
 async function deliver(diagram: Record<string, unknown>, editId?: string, baseVersion?: number): Promise<Delivery> {
     let id: string;
     let version: number;
@@ -111,20 +158,8 @@ async function deliver(diagram: Record<string, unknown>, editId?: string, baseVe
             throw new Error(`Diagram "${editId}" has no v${baseVersion} — available: ${versions.map(v => 'v' + v).join(', ')}.`);
         }
         const layoutSource = baseVersion !== undefined ? readVersion(editId, baseVersion) : latest;
-        const prevLayout = layoutSource._layout as Record<string, unknown> | undefined;
-        if (prevLayout) {
-            const surviving = new Set(
-                (diagram.type === 'class'
-                    ? (diagram.classes as Array<{ id: string }> | undefined)
-                    : (diagram.nodes as Array<{ id: string }> | undefined)
-                )?.map(e => e.id) ?? [],
-            );
-            const carried: Record<string, unknown> = {};
-            for (const [nodeId, pos] of Object.entries(prevLayout)) {
-                if (surviving.has(nodeId)) { carried[nodeId] = pos; }
-            }
-            if (Object.keys(carried).length) { diagram = { ...diagram, _layout: carried }; }
-        }
+        const carried = carryLayout(layoutSource._layout, diagram);
+        if (carried) { diagram = { ...diagram, _layout: carried }; }
     } else {
         id = slugify(String(diagram.title ?? 'diagram'));
         version = 1;
