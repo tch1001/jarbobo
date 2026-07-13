@@ -90,3 +90,44 @@ select.tbtn {
 svg text { user-select: none; }
 .clickable { cursor: pointer; }
 .draggable { cursor: grab; }
+
+/* ---- detail panel: ordered code references with inline previews ---- */
+#detail { width: min(420px, 60vw); }
+#tooltip .moreRefs { opacity: .55; font-style: italic; }
+.refItem { margin: 0 0 12px; border: 1px solid var(--vscode-panel-border, #3c3c3c); border-radius: 4px; overflow: hidden; }
+.refHead {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: var(--vscode-editorHoverWidget-background, #252526);
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  border: none; border-bottom: 1px solid var(--vscode-panel-border, #3c3c3c);
+  padding: 5px 8px; cursor: pointer; text-align: left; font-size: 11.5px;
+}
+.refHead:hover { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); }
+.refHead .refRole { font-weight: 600; }
+.refHead .refLoc { font-family: Menlo, Consolas, monospace; opacity: .85; }
+.refHead .refGo { margin-left: auto; opacity: .7; }
+#detail pre.refCode {
+  white-space: pre; overflow-x: auto; margin: 0; padding: 6px 0;
+  font-family: Menlo, Consolas, monospace; font-size: 11px; line-height: 1.45;
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+#detail pre.refCode.err { padding: 6px 8px; opacity: .6; font-style: italic; white-space: pre-wrap; }
+.refLine { display: flex; }
+.refLine .ln {
+  flex: 0 0 34px; text-align: right; padding-right: 8px; user-select: none;
+  opacity: .4; font-size: 10px; line-height: inherit;
+}
+.refLine .lc { flex: 1; padding-right: 8px; }
+.refLine.focus { background: color-mix(in srgb, var(--vscode-charts-blue, #569cd6) 14%, transparent); }
+.refGap { text-align: center; opacity: .4; user-select: none; line-height: 1.2; }
+
+/* theme-adaptive syntax colors (highlight.js token classes) */
+.refCode .hljs-keyword, .refCode .hljs-literal, .refCode .hljs-built_in, .refCode .hljs-meta { color: var(--vscode-charts-purple, #c586c0); }
+.refCode .hljs-string, .refCode .hljs-regexp, .refCode .hljs-char { color: var(--vscode-charts-orange, #ce9178); }
+.refCode .hljs-comment, .refCode .hljs-quote { color: var(--vscode-descriptionForeground, #6a9955); font-style: italic; }
+.refCode .hljs-number, .refCode .hljs-symbol { color: var(--vscode-charts-green, #b5cea8); }
+.refCode .hljs-title, .refCode .hljs-section { color: var(--vscode-charts-yellow, #dcdcaa); }
+.refCode .hljs-type, .refCode .hljs-class { color: var(--vscode-charts-foreground, #4ec9b0); }
+.refCode .hljs-attr, .refCode .hljs-property, .refCode .hljs-variable, .refCode .hljs-template-variable { color: var(--vscode-charts-blue, #9cdcfe); }
+.refHead .refRole { color: var(--vscode-charts-blue, #569cd6); margin-right: 2px; }
+.refHead:hover .refRole { color: inherit; }

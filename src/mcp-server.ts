@@ -25,8 +25,17 @@ fs.mkdirSync(DIAGRAMS_DIR, { recursive: true });
 const interactiveProps = {
     tooltip: z.string().optional().describe('Short text shown when the user hovers this element. When the element has a code reference, use this to say what that code IS in the diagram\'s story (e.g. "handler that receives the POST", "the struct that owns the registry") — never leave a reference unexplained.'),
     detail: z.string().optional().describe('Longer explanation shown in a side panel when the user clicks this element. Plain text, newlines preserved. Use this for the "why" that does not fit on the diagram.'),
-    file: z.string().optional().describe('Absolute path to a source file. Clicking the element (or its "Go to source" button) opens this file in the editor. Attach these aggressively to anything that corresponds to code, and ALWAYS pair with a tooltip/detail explaining the role of the referenced code.'),
+    file: z.string().optional().describe('Absolute path to a source file. Clicking the element (or its "Go to source" button) opens this file in the editor. Attach these aggressively to anything that corresponds to code, and ALWAYS pair with a tooltip/detail explaining the role of the referenced code. Shorthand for a single-entry `refs` list — use `refs` when an element maps to more than one location or when you want line-range highlighting.'),
     line: z.number().int().optional().describe('1-based line number to jump to within `file`.'),
+    refs: z.array(z.object({
+        file: z.string().describe('Absolute path to a source file.'),
+        line: z.number().int().optional().describe('1-based line the cursor lands on when the reference opens. Defaults to the first line of the first range.'),
+        ranges: z.array(z.object({
+            start: z.number().int().describe('1-based first line of the range.'),
+            end: z.number().int().optional().describe('Last line of the range, inclusive. Defaults to `start`.'),
+        })).optional().describe('Line ranges to HIGHLIGHT in the editor when this reference opens — disjoint ranges are fine and encouraged (e.g. a function signature plus the interesting call inside it). These exact lines are also shown, syntax-highlighted, in the click panel.'),
+        label: z.string().optional().describe('The ROLE of this reference in the diagram\'s story, e.g. "definition", "call site", "where the config is read". Shown as the reference\'s heading in the click panel.'),
+    })).optional().describe('ORDERED list of code references — most important FIRST (ctrl/cmd+click and "Go to source" open the first one; plain click opens the panel listing all of them). The panel renders each reference\'s actual code from disk, syntax-highlighted — so never paste code excerpts into detail/tooltip; reference them here instead.'),
     href: z.string().optional().describe('URL opened in the browser on click (docs, PRs, dashboards). Shown as a button if `detail` is also set.'),
     noRef: z.boolean().optional().describe('Set true to explicitly declare that this element has NO corresponding source location (an external system, a human actor, an abstract concept). Only use it when a code reference genuinely does not exist — never to save the effort of finding one.'),
 };
@@ -51,7 +60,7 @@ function requireRefs(): boolean {
     return true;
 }
 
-type RefLike = { file?: string; href?: string; noRef?: boolean };
+type RefLike = { file?: string; refs?: unknown[]; href?: string; noRef?: boolean };
 function checkRefs(
     kind: string,
     elements: Array<{ name: string } & RefLike>,
@@ -59,7 +68,8 @@ function checkRefs(
     opts?: { hrefCounts?: boolean },
 ) {
     if (!requireRefs()) { return; }
-    const missing = elements.filter(el => !el.file && !el.noRef && !(opts?.hrefCounts && el.href));
+    const missing = elements.filter(el =>
+        !el.file && !(el.refs && el.refs.length) && !el.noRef && !(opts?.hrefCounts && el.href));
     if (!missing.length) { return; }
     problems.push(
         `${missing.length} ${kind} without a code reference: ${missing.map(el => `"${el.name}"`).join(', ')}. ` +
@@ -234,7 +244,8 @@ const server = new McpServer(
             'Prefer editing over redrawing: when the user asks to tweak/extend/fix a diagram, pass its id back to the same draw tool with the full updated spec. Users mean the LATEST version unless they explicitly name one; use open_diagram to display an older version (it also returns that version\'s spec, which you can resubmit as an edit to roll back — pass baseVersion: N as well so that version\'s hand-arranged layout is inherited instead of the latest one\'s). Use list_diagrams to find ids from earlier sessions. ' +
             'LAYOUT PRESERVATION: users often hand-arrange diagrams by dragging, and edits automatically carry that arrangement forward — but it is keyed by element id, so KEEP IDS STABLE across edits (renaming an id loses its position; genuinely new elements are placed near their connected neighbors automatically). Never invent coordinate fields — positions are not part of the tool schema and unknown fields are ignored. ' +
             'Make full use of interactivity instead of cramming text into the picture: keep on-diagram labels short; put one-liners in `tooltip` (hover); put paragraphs in `detail` (click opens a side panel); use `href` for docs/links. ' +
-            'CODE REFERENCES ARE REQUIRED: attach `file`+`line` to every element that corresponds to code you have seen, and ALWAYS explain the role of the referenced code in the tooltip or detail — what it is and what it does in this diagram\'s story (e.g. "the exec slot — runs the module body at import", "handler that receives the POST /diagram request"). A bare path with no explanation is not acceptable. Draw calls are REJECTED when primary elements (graph nodes, sequence messages, classes, swimlane steps, timeline items) lack both a reference and an explicit opt-out — set `noRef: true` only on elements that genuinely have no source location (external systems, human actors, abstract concepts), never to save effort. ' +
+            'CODE REFERENCES ARE REQUIRED: attach `file`+`line` (or an ordered `refs` list) to every element that corresponds to code you have seen, and ALWAYS explain the role of the referenced code in the tooltip or detail — what it is and what it does in this diagram\'s story (e.g. "the exec slot — runs the module body at import", "handler that receives the POST /diagram request"). A bare path with no explanation is not acceptable. Draw calls are REJECTED when primary elements (graph nodes, sequence messages, classes, swimlane steps, timeline items) lack both a reference and an explicit opt-out — set `noRef: true` only on elements that genuinely have no source location (external systems, human actors, abstract concepts), never to save effort. ' +
+            'MULTIPLE REFERENCES + LINE HIGHLIGHTING: an element can carry `refs`, an ORDERED list of references (most important first), each with an optional `label` (its role: "definition", "call site", …) and optional `ranges` — line ranges that get HIGHLIGHTED in the editor when the reference opens (disjoint ranges are fine: highlight a signature and a key call site together). Clicking an element shows all its references in a side panel WITH their actual code rendered syntax-highlighted from disk — so never paste code excerpts into `detail`; use `refs` with tight `ranges` instead and spend `detail` on explanation. ' +
             'User gestures worth mentioning when relevant: a plain click opens the detail panel (when `detail` is set); cmd/ctrl+click on any element opens its `file`+`line` code reference directly, bypassing the panel; holding Ctrl while hovering highlights the code reference in the tooltip. ' +
             'Prefer two or three focused diagrams over one overloaded one.',
     },

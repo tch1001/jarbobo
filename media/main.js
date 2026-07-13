@@ -5,7 +5,27 @@
   const vscodeApi = typeof acquireVsCodeApi === 'function'
     ? acquireVsCodeApi()
     : {
-        postMessage: (m) => console.log('[jarbobo dev] postMessage', m),
+        postMessage: (m) => {
+          console.log('[jarbobo dev] postMessage', m);
+          // dev harness: fake the extension's snippet response so the detail
+          // panel's code preview can be exercised without an extension host
+          if (m.type === 'snippets') {
+            setTimeout(() => window.postMessage({
+              type: 'snippets', reqId: m.reqId,
+              results: m.refs.map((r) => ({
+                ok: true, lang: 'javascript', focusLine: r.line ?? (r.ranges && r.ranges[0].start) ?? 1,
+                chunks: (r.ranges && r.ranges.length ? r.ranges : [{ start: (r.line || 3) - 2, end: (r.line || 3) + 2 }])
+                  .map((rg) => ({
+                    start: rg.start,
+                    text: Array.from({ length: (rg.end || rg.start) - rg.start + 1 },
+                      (_, i) => (rg.start + i) % 3 === 0
+                        ? '  return demo(' + (rg.start + i) + '); // ' + r.file.split('/').pop()
+                        : 'function line' + (rg.start + i) + '(x) { /* dev */ }').join('\n'),
+                  })),
+              })),
+            }, '*'), 60);
+          }
+        },
         getState: () => null,
         setState: () => {},
       };
@@ -74,17 +94,35 @@
     return el.innerHTML;
   }
 
+  // ---------------------------------------------------------------- code references
+  // An element carries an ORDERED list of code references: `refs` (first =
+  // primary, the ctrl/cmd+click target), with legacy `file`+`line` still
+  // accepted as a single-ref shorthand. Each ref may carry `ranges` — line
+  // ranges highlighted in the editor on open and previewed in the panel.
+  function getRefs(item) {
+    if (!item) { return []; }
+    if (Array.isArray(item.refs) && item.refs.length) { return item.refs.filter((r) => r && r.file); }
+    return item.file ? [{ file: item.file, line: item.line }] : [];
+  }
+  function refLine(r) { return r.line || (r.ranges && r.ranges.length ? r.ranges[0].start : 0); }
+  function refDisplay(r) { const ln = refLine(r); return r.file + (ln ? ':' + ln : ''); }
+  function openRef(r) {
+    vscodeApi.postMessage({ type: 'open', file: r.file, line: r.line, ranges: r.ranges, target: openTarget });
+  }
+
   let hoverRef = null; // {item, x, y} while a tooltip is visible — lets Ctrl re-style it live
 
   function showItemTip(item, x, y, ctrl) {
     const hasTip = item && item.tooltip;
-    const hasRef = item && item.file;
-    if (!hasTip && !hasRef) { return; }
+    const refs = getRefs(item);
+    if (!hasTip && !refs.length) { return; }
     const parts = [];
     if (hasTip) { parts.push('<div>' + escHtml(item.tooltip) + '</div>'); }
-    if (hasRef) {
+    if (refs.length) {
       parts.push('<div class="ref' + (ctrl ? ' bold' : '') + '">'
-        + escHtml(item.file + (item.line ? ':' + item.line : '')) + '</div>');
+        + escHtml(refDisplay(refs[0]))
+        + (refs.length > 1 ? ' <span class="moreRefs">+' + (refs.length - 1) + ' more</span>' : '')
+        + '</div>');
     }
     tip.innerHTML = parts.join('');
     tip.style.display = 'block';
@@ -105,19 +143,102 @@
 
   let detailLocked = false;
   let detailOpenedAt = 0;
+  let snippetReq = 0; // stale-response guard: only the latest request renders
+
+  // Split hljs-highlighted HTML into per-line HTML with balanced span tags
+  // (hljs spans can cross newlines, e.g. block comments). hljs escapes < > &,
+  // so the only tags present are its own <span class="...">…</span>.
+  function splitHighlighted(html) {
+    const lines = [];
+    const stack = [];
+    let cur = '';
+    const re = /(<span class="[^"]*">)|(<\/span>)|(\n)|([^<\n]+|<)/g;
+    let m;
+    while ((m = re.exec(html))) {
+      if (m[1]) { stack.push(m[1]); cur += m[1]; }
+      else if (m[2]) { stack.pop(); cur += m[2]; }
+      else if (m[3]) { cur += '</span>'.repeat(stack.length); lines.push(cur); cur = stack.join(''); }
+      else { cur += m[0]; }
+    }
+    lines.push(cur + '</span>'.repeat(stack.length));
+    return lines;
+  }
+  function highlightLines(text, lang) {
+    try {
+      if (window.hljs) {
+        const res = lang && hljs.getLanguage(lang)
+          ? hljs.highlight(text, { language: lang })
+          : hljs.highlightAuto(text);
+        return splitHighlighted(res.value);
+      }
+    } catch (e) { /* fall through to plain */ }
+    return text.split('\n').map(escHtml);
+  }
+  function renderSnippet(pre, res) {
+    pre.innerHTML = '';
+    pre.classList.remove('err');
+    if (!res || !res.ok) {
+      pre.textContent = (res && res.err) || 'could not read file';
+      pre.classList.add('err');
+      return;
+    }
+    (res.chunks || []).forEach((ch, idx) => {
+      if (idx) {
+        const gap = document.createElement('div');
+        gap.className = 'refGap';
+        gap.textContent = '⋯';
+        pre.appendChild(gap);
+      }
+      highlightLines(ch.text, res.lang).forEach((lineHtml, j) => {
+        const row = document.createElement('div');
+        row.className = 'refLine' + (ch.start + j === res.focusLine ? ' focus' : '');
+        row.innerHTML = '<span class="ln">' + (ch.start + j) + '</span><span class="lc">' + (lineHtml || '&nbsp;') + '</span>';
+        pre.appendChild(row);
+      });
+    });
+  }
 
   function openDetail(item, label, kind) {
     detailOpenedAt = Date.now();
     $('#detailKind').textContent = kind || '';
     $('#detailTitle').textContent = label || '';
     $('#detailBody').textContent = item.detail || item.tooltip || '';
+    const refs = getRefs(item);
+    // ordered reference list, each with a clickable header + code preview
+    // (the actual referenced lines, fetched from disk and syntax-highlighted)
+    const refsBox = $('#detailRefs');
+    if (refsBox) {
+      refsBox.innerHTML = '';
+      const reqId = ++snippetReq;
+      refs.forEach((r, i) => {
+        const div = document.createElement('div');
+        div.className = 'refItem';
+        const head = document.createElement('button');
+        head.className = 'refHead';
+        const ln = refLine(r);
+        head.innerHTML = (r.label ? '<span class="refRole">' + escHtml(r.label) + '</span>' : '')
+          + '<span class="refLoc">' + escHtml((r.file.split('/').pop() || r.file) + (ln ? ':' + ln : '')) + '</span>'
+          + '<span class="refGo">↗</span>';
+        head.title = 'Open ' + refDisplay(r);
+        head.onclick = () => openRef(r);
+        div.appendChild(head);
+        const pre = document.createElement('pre');
+        pre.className = 'refCode';
+        pre.id = 'snip-' + reqId + '-' + i;
+        pre.textContent = '…';
+        div.appendChild(pre);
+        refsBox.appendChild(div);
+      });
+      if (refs.length) { vscodeApi.postMessage({ type: 'snippets', reqId, refs }); }
+    }
     const actions = $('#detailActions');
     actions.innerHTML = '';
-    if (item.file) {
+    if (refs.length) {
       const b = document.createElement('button');
-      b.textContent = 'Go to source' + (item.line ? ` :${item.line}` : '');
-      b.title = item.file + (item.line ? ':' + item.line : '');
-      b.onclick = () => vscodeApi.postMessage({ type: 'open', file: item.file, line: item.line, target: openTarget });
+      const ln = refLine(refs[0]);
+      b.textContent = 'Go to source' + (ln ? ` :${ln}` : '');
+      b.title = refDisplay(refs[0]);
+      b.onclick = () => openRef(refs[0]);
       actions.appendChild(b);
     }
     if (item.href) {
@@ -242,16 +363,21 @@
   // cmd/ctrl+click (opts.direct) skips the panel and opens the code reference immediately.
   function interact(item, label, kind, opts) {
     if (!item || suppressClick) { return; }
+    const refs = getRefs(item);
     if (opts && opts.direct) {
-      if (item.file) { vscodeApi.postMessage({ type: 'open', file: item.file, line: item.line, target: openTarget }); return; }
+      // cmd/ctrl+click: straight to the PRIMARY (first) reference
+      if (refs.length) { openRef(refs[0]); return; }
       if (item.href) { vscodeApi.postMessage({ type: 'openUrl', url: item.href }); return; }
     }
     if (item.detail) { openDetail(item, label, kind); }
-    else if (item.file) { vscodeApi.postMessage({ type: 'open', file: item.file, line: item.line, target: openTarget }); }
+    else if (refs.length > 1) { openDetail(item, label, kind); } // several refs → panel lists them all
+    else if (refs.length) { openRef(refs[0]); }
     else if (item.href) { vscodeApi.postMessage({ type: 'openUrl', url: item.href }); }
     else if (item.tooltip) { openDetail(item, label, kind); }
   }
-  function isInteractive(item) { return !!(item && (item.tooltip || item.detail || item.file || item.href)); }
+  function isInteractive(item) {
+    return !!(item && (item.tooltip || item.detail || item.file || item.href || (item.refs && item.refs.length)));
+  }
 
   function bindSvgItem(el, item, label, kind) {
     if (!item) { return; }
@@ -339,6 +465,13 @@
     const msg = e.data;
     if (msg && msg.type === 'render' && msg.diagram) { render(msg.diagram); }
     else if (msg && msg.type === 'becameVisible') { repaintCanvas(); }
+    else if (msg && msg.type === 'snippets' && msg.reqId === snippetReq) {
+      // code previews for the detail panel's reference list
+      (msg.results || []).forEach((res, i) => {
+        const pre = document.getElementById('snip-' + msg.reqId + '-' + i);
+        if (pre) { renderSnippet(pre, res); }
+      });
+    }
   });
 
   // The graph renderer's <canvas> (cytoscape) can go visually blank after
@@ -660,14 +793,26 @@
       if (!edge) { return; }
       down.stopPropagation(); down.preventDefault();
       holder.style.cursor = 'grabbing';
-      let moved = false;
-      const move = (me) => {
-        moved = true;
-        const m = clientToModel(me.clientX, me.clientY);
+      // Anchor the drag to the GRAB point: the label moves by the same delta
+      // as the mouse (projected onto the edge), instead of re-centering under
+      // the cursor — grabbing a label's corner must not make it jump.
+      const projectT = (clientX, clientY) => {
+        const m = clientToModel(clientX, clientY);
         const s = edge.source().position(), tp = edge.target().position();
         const dx = tp.x - s.x, dy = tp.y - s.y, len2 = dx * dx + dy * dy;
-        let t = len2 ? ((m.x - s.x) * dx + (m.y - s.y) * dy) / len2 : 0.5;
-        t = Math.max(0.04, Math.min(0.96, t));
+        return len2 ? ((m.x - s.x) * dx + (m.y - s.y) * dy) / len2 : 0.5;
+      };
+      const rec0 = layoutState.edgeLabels[edge.data('ekey')];
+      const t0 = rec0 && typeof rec0.t === 'number' ? rec0.t : 0.5;
+      const tGrab = projectT(down.clientX, down.clientY);
+      let moved = false;
+      const move = (me) => {
+        // ignore sub-3px jitters so an imprecise click doesn't count as a drag
+        if (!moved && Math.abs(me.clientX - down.clientX) < 3 && Math.abs(me.clientY - down.clientY) < 3) { return; }
+        moved = true;
+        const s = edge.source().position(), tp = edge.target().position();
+        const dx = tp.x - s.x, dy = tp.y - s.y;
+        const t = Math.max(0.04, Math.min(0.96, t0 + (projectT(me.clientX, me.clientY) - tGrab)));
         edge.data('mx', (t - 0.5) * dx);
         edge.data('my', (t - 0.5) * dy);
         layoutState.edgeLabels[edge.data('ekey')] = { t };

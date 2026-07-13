@@ -26,6 +26,7 @@ contract:
 | `tooltip` | hover text on any node, edge, message, or class |
 | `detail` | click → side panel with the full explanation (lockable 🔒, click-outside to close) |
 | `file` + `line` | **click → your editor opens that source line** (⌘-click skips the detail panel and jumps straight there; hold ⌃ while hovering to highlight the reference) |
+| `refs` | an **ordered list** of code references per element — the click panel shows each one's actual code, **syntax-highlighted from disk**; opening one highlights its line `ranges` in the editor (disjoint ranges welcome: a signature + the interesting call site) |
 | `href` | click → docs / PR / dashboard |
 
 Plus the viewer mechanics you'd expect from a real tool:

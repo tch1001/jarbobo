@@ -82,6 +82,15 @@ export function activate(context: vscode.ExtensionContext) {
                 if (!isJarbobo) { lastOtherTabClosedAt = Date.now(); }
             }
         }),
+        // Ref-range highlights behave like the editor's own "range highlight":
+        // they vanish once the user moves the cursor. The grace window skips
+        // the selection event fired by our own jump.
+        vscode.window.onDidChangeTextEditorSelection((e) => {
+            if (refHighlight && decoratedEditor === e.textEditor && Date.now() - lastHighlightAt > 1500) {
+                e.textEditor.setDecorations(refHighlight, []);
+                decoratedEditor = undefined;
+            }
+        }),
         vscode.commands.registerCommand('jarbobo.reopenClosed', () => {
             const d = closedStack.pop();
             if (d) {
@@ -213,9 +222,87 @@ function wirePanel(panel: vscode.WebviewPanel, diagram: unknown) {
     updateStatus();
 }
 
+// ---------------------------------------------------------------- code references
+type RefRange = { start: number; end?: number };
+
+// Highlight the referenced line ranges (disjoint is fine) in the opened editor,
+// like a multi-range "go to" — cleared when the user moves the cursor.
+let refHighlight: vscode.TextEditorDecorationType | undefined;
+let decoratedEditor: vscode.TextEditor | undefined;
+let lastHighlightAt = 0;
+function applyRefHighlights(editor: vscode.TextEditor, ranges: RefRange[]) {
+    if (!refHighlight) {
+        refHighlight = vscode.window.createTextEditorDecorationType({
+            backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'),
+            isWholeLine: true,
+            overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.rangeHighlightForeground'),
+            overviewRulerLane: vscode.OverviewRulerLane.Full,
+        });
+    }
+    if (decoratedEditor && decoratedEditor !== editor) {
+        try { decoratedEditor.setDecorations(refHighlight, []); } catch { /* editor may be gone */ }
+    }
+    decoratedEditor = editor;
+    lastHighlightAt = Date.now();
+    const max = editor.document.lineCount;
+    editor.setDecorations(refHighlight, ranges.map((r) => {
+        const s = Math.min(Math.max(1, Math.round(r.start)), max) - 1;
+        const e = Math.min(Math.max(r.start, Math.round(r.end ?? r.start)), max) - 1;
+        return new vscode.Range(s, 0, Math.max(s, e), Number.MAX_SAFE_INTEGER);
+    }));
+}
+
+// Extract the referenced lines from disk for the detail panel's code preview.
+// `ranges` are shown verbatim (merged when overlapping); a bare `line` gets a
+// few lines of context around it.
+const LANG_BY_EXT: Record<string, string> = {
+    ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+    js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+    py: 'python', rb: 'ruby', rs: 'rust', go: 'go', java: 'java', kt: 'kotlin',
+    c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp',
+    cs: 'csharp', swift: 'swift', php: 'php', sh: 'bash', bash: 'bash', zsh: 'bash',
+    json: 'json', jsonc: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini',
+    html: 'xml', xml: 'xml', css: 'css', scss: 'scss', less: 'less',
+    md: 'markdown', sql: 'sql', lua: 'lua', pl: 'perl', dart: 'dart', scala: 'scala',
+};
+const SNIPPET_MAX_LINES = 120;
+function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[] }) {
+    try {
+        if (!r.file) { throw new Error('missing file'); }
+        const all = fs.readFileSync(r.file, 'utf8').split(/\r?\n/);
+        const clamp = (n: number) => Math.min(Math.max(1, Math.round(n)), all.length);
+        let ranges = (r.ranges ?? [])
+            .map((x) => ({ start: clamp(x.start), end: clamp(x.end ?? x.start) }))
+            .map((x) => (x.end < x.start ? { start: x.end, end: x.start } : x))
+            .sort((a, b) => a.start - b.start);
+        if (!ranges.length) {
+            const ln = clamp(r.line ?? 1);
+            ranges = [{ start: Math.max(1, ln - 3), end: Math.min(all.length, ln + 3) }];
+        }
+        const merged: typeof ranges = [];
+        for (const x of ranges) {
+            const last = merged[merged.length - 1];
+            if (last && x.start <= last.end + 1) { last.end = Math.max(last.end, x.end); }
+            else { merged.push({ ...x }); }
+        }
+        let budget = SNIPPET_MAX_LINES;
+        const chunks: Array<{ start: number; text: string }> = [];
+        for (const x of merged) {
+            if (budget <= 0) { break; }
+            const take = Math.min(x.end - x.start + 1, budget);
+            chunks.push({ start: x.start, text: all.slice(x.start - 1, x.start - 1 + take).join('\n') });
+            budget -= take;
+        }
+        const ext = (r.file.split('.').pop() ?? '').toLowerCase();
+        return { ok: true, lang: LANG_BY_EXT[ext] ?? ext, focusLine: r.line ?? merged[0]?.start, chunks };
+    } catch (e) {
+        return { ok: false, err: String((e as Error)?.message ?? e) };
+    }
+}
+
 async function onWebviewMessage(
     panel: vscode.WebviewPanel,
-    msg: { type: string; file?: string; line?: number; url?: string; target?: string; positions?: unknown; id?: string; version?: number; direction?: string },
+    msg: { type: string; file?: string; line?: number; ranges?: RefRange[]; url?: string; target?: string; positions?: unknown; id?: string; version?: number; direction?: string; reqId?: number; refs?: Array<{ file?: string; line?: number; ranges?: RefRange[] }> },
 ) {
     if (msg.type === 'ready') {
         const diagram = panels.get(panel);
@@ -260,8 +347,10 @@ async function onWebviewMessage(
         log(`open ref: target=${msg.target} panel.viewColumn=${String(panel.viewColumn)} panel.active=${panel.active} -> viewColumn=${viewColumn}`);
         try {
             const doc = await vscode.workspace.openTextDocument(msg.file);
-            const target = msg.line && msg.line > 0
-                ? new vscode.Range(new vscode.Position(msg.line - 1, 0), new vscode.Position(msg.line - 1, 0))
+            // cursor lands on `line`, falling back to the first highlighted range
+            const primaryLine = (msg.line && msg.line > 0) ? msg.line : msg.ranges?.[0]?.start;
+            const target = primaryLine && primaryLine > 0
+                ? new vscode.Range(new vscode.Position(primaryLine - 1, 0), new vscode.Position(primaryLine - 1, 0))
                 : undefined;
             // preview: true → italic "preview" tab: each ref click reuses the
             // same slot instead of piling up tabs; editing/double-clicking
@@ -281,9 +370,13 @@ async function onWebviewMessage(
                 // adds no history entry
                 editor.revealRange(target, vscode.TextEditorRevealType.InCenter);
             }
+            if (msg.ranges?.length) { applyRefHighlights(editor, msg.ranges); }
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot open ${msg.file}: ${e}`);
         }
+    } else if (msg.type === 'snippets' && Array.isArray(msg.refs)) {
+        // detail panel asks for the referenced code to render inline
+        panel.webview.postMessage({ type: 'snippets', reqId: msg.reqId, results: msg.refs.map(readSnippet) });
     } else if (msg.type === 'loadVersion' && msg.id && typeof msg.version === 'number') {
         // user picked a version in the panel's version dropdown
         try {
@@ -349,8 +442,10 @@ function buildHtml(webview: vscode.Webview): string {
   <div class="kind" id="detailKind"></div>
   <h2 id="detailTitle"></h2>
   <pre id="detailBody"></pre>
+  <div id="detailRefs"></div>
   <div class="actions" id="detailActions"></div>
 </aside>
+<script nonce="${nonce}" src="${uri('vendor/highlight.min.js')}"></script>
 <script nonce="${nonce}" src="${uri('vendor/dagre.min.js')}"></script>
 <script nonce="${nonce}" src="${uri('vendor/cytoscape.min.js')}"></script>
 <script nonce="${nonce}" src="${uri('vendor/cytoscape-dagre.js')}"></script>

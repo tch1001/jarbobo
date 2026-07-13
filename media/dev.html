@@ -40,6 +40,7 @@
   <div class="kind" id="detailKind"></div>
   <h2 id="detailTitle"></h2>
   <pre id="detailBody"></pre>
+  <div id="detailRefs"></div>
   <div class="actions" id="detailActions"></div>
 </aside>
 <div id="devbar">
@@ -49,6 +50,7 @@
   <button onclick="show('swimlane')">swimlane</button>
   <button onclick="show('timeline')">timeline</button>
 </div>
+<script src="vendor/highlight.min.js"></script>
 <script src="vendor/dagre.min.js"></script>
 <script src="vendor/cytoscape.min.js"></script>
 <script src="vendor/cytoscape-dagre.js"></script>
@@ -70,7 +72,10 @@ const samples = {
       { id: 'init', label: 'PyInit_example', group: 'so', color: '#dcdcaa', shape: 'hexagon', tooltip: 'THE boundary: interpreter calls a C function pointer', file: '/Users/fish/exploring-pybind11/example.cpp', line: 5 },
       { id: 'exec', label: 'pybind11_exec_example', group: 'so', tooltip: 'runs the PYBIND11_MODULE body' },
       { id: 'slot', label: 'function_record\n(&add stored)', group: 'so', shape: 'cylinder', color: '#ce9178', tooltip: 'data slot holding the C++ function pointer' },
-      { id: 'tramp', label: 'trampoline __invoke', group: 'so', tooltip: 'unpacks Python args → C ints, wraps result' },
+      { id: 'tramp', label: 'trampoline __invoke', group: 'so', tooltip: 'unpacks Python args → C ints, wraps result', detail: 'The generated trampoline: casts PyObject* args to C++ ints, calls add, wraps the result.', refs: [
+        { file: '/Users/fish/exploring-pybind11/example.cpp', line: 3, ranges: [{ start: 1, end: 4 }], label: 'definition' },
+        { file: '/Users/fish/pybind11/include/pybind11/pybind11.h', line: 250, ranges: [{ start: 245, end: 252 }, { start: 260, end: 262 }], label: 'call site' }
+      ] },
       { id: 'add', label: 'add(int, int)', group: 'so', color: '#4ec9b0', tooltip: 'add w0, w1, w0 ; ret', file: '/Users/fish/exploring-pybind11/example.cpp', line: 3 }
     ],
     edges: [

@@ -5,6 +5,7 @@ const pairs = [
   ['node_modules/cytoscape/dist/cytoscape.min.js', 'media/vendor/cytoscape.min.js'],
   ['node_modules/dagre/dist/dagre.min.js', 'media/vendor/dagre.min.js'],
   ['node_modules/cytoscape-dagre/cytoscape-dagre.js', 'media/vendor/cytoscape-dagre.js'],
+  ['node_modules/@highlightjs/cdn-assets/highlight.min.js', 'media/vendor/highlight.min.js'],
 ];
 
 fs.mkdirSync('media/vendor', { recursive: true });
