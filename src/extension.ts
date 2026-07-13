@@ -235,11 +235,16 @@ let refHighlight: vscode.TextEditorDecorationType | undefined;
 let activeHighlights: Map<string, RefRange[]> | undefined; // fsPath → ranges
 function decorationType(): vscode.TextEditorDecorationType {
     if (!refHighlight) {
+        // deliberately loud: a yellow wash readable in both themes, so the
+        // referenced lines are unmissable while walking a call chain
         refHighlight = vscode.window.createTextEditorDecorationType({
-            backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'),
+            backgroundColor: 'rgba(255, 213, 0, 0.16)',
             isWholeLine: true,
-            overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.rangeHighlightForeground'),
+            overviewRulerColor: 'rgba(255, 213, 0, 0.9)',
             overviewRulerLane: vscode.OverviewRulerLane.Full,
+            borderWidth: '0 0 0 3px',
+            borderStyle: 'solid',
+            borderColor: 'rgba(255, 213, 0, 0.85)',
         });
     }
     return refHighlight;
