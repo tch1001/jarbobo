@@ -399,7 +399,10 @@ async function readSnippet(r: { file?: string; line?: number; ranges?: RefRange[
             budget -= take;
         }
         const ext = (r.file.split('.').pop() ?? '').toLowerCase();
-        return { ok: true, lang: LANG_BY_EXT[ext] ?? ext, focusLine: line ?? merged[0]?.start, chunks, refRanges };
+        // impliedRanges/focusLine are the RE-ANCHORED ("implied") positions —
+        // the webview swaps them into the ref headers so displayed numbers
+        // track the file as it drifts, while the spec keeps the originals
+        return { ok: true, lang: LANG_BY_EXT[ext] ?? ext, focusLine: line ?? merged[0]?.start, chunks, refRanges, impliedRanges: ranges, impliedLine: line };
     } catch (e) {
         return { ok: false, err: String((e as Error)?.message ?? e) };
     }
@@ -455,6 +458,11 @@ async function onWebviewMessage(
             // drift recovery: re-anchor the jump target against the current text
             const docLines = doc.getText().split(/\r?\n/);
             const anchoredRanges = msg.ranges?.length ? reanchorRanges(docLines, msg.ranges, msg.anchor) : undefined;
+            if (anchoredRanges && JSON.stringify(anchoredRanges) !== JSON.stringify(msg.ranges)) {
+                log(`reanchor: ${msg.file} ${JSON.stringify(msg.ranges)} -> ${JSON.stringify(anchoredRanges)}`);
+            } else if (msg.ranges?.length && !msg.anchor) {
+                log(`reanchor: ${msg.file} has NO anchor (diagram predates anchor support — redraw/edit it to snapshot)`);
+            }
             // cursor lands on `line`, falling back to the first highlighted range
             const primaryLine = (msg.line && msg.line > 0)
                 ? reanchorLine(docLines, msg.line, msg.anchor)

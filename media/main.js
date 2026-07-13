@@ -25,11 +25,15 @@
                   if (last && rg.start <= last.end + 1) { last.end = Math.max(last.end, rg.end); }
                   else { merged.push({ start: rg.start, end: rg.end }); }
                 });
+                // simulate drift: the "current file" moved everything down 3 lines
+                const drift = 3;
+                const impliedRanges = refRanges.map((rg) => ({ start: rg.start + drift, end: rg.end + drift }));
                 return {
-                  ok: true, lang: 'javascript', focusLine: r.line ?? (refRanges[0] && refRanges[0].start) ?? 1,
-                  refRanges,
+                  ok: true, lang: 'javascript', focusLine: (r.line ?? (refRanges[0] && refRanges[0].start) ?? 1) + drift,
+                  refRanges: impliedRanges, impliedRanges,
+                  impliedLine: r.line !== undefined ? r.line + drift : undefined,
                   chunks: merged.map((rg) => ({
-                    start: rg.start,
+                    start: rg.start + drift,
                     text: Array.from({ length: rg.end - rg.start + 1 },
                       (_, i) => (rg.start + i) % 3 === 0
                         ? '  return demo(' + (rg.start + i) + '); // ' + r.file.split('/').pop()
@@ -253,8 +257,11 @@
         const head = document.createElement('button');
         head.className = 'refHead';
         const loc = refLoc(r);
+        const base = r.file.split('/').pop() || r.file;
+        // the loc span shows ORIGINAL numbers until the snippet response
+        // replaces them with the IMPLIED (re-anchored) ones
         head.innerHTML = (r.label ? '<span class="refRole">' + escHtml(r.label) + '</span>' : '')
-          + '<span class="refLoc">' + escHtml((r.file.split('/').pop() || r.file) + (loc ? ':' + loc : '')) + '</span>'
+          + '<span class="refLoc" id="refloc-' + reqId + '-' + i + '">' + escHtml(base + (loc ? ':' + loc : '')) + '</span>'
           + '<span class="refGo">↗</span>';
         head.title = 'Open ' + refDisplay(r);
         head.onclick = () => openRef(r); // just THIS hop's highlight
@@ -515,6 +522,22 @@
       (msg.results || []).forEach((res, i) => {
         const pre = document.getElementById('snip-' + msg.reqId + '-' + i);
         if (pre) { renderSnippet(pre, res); }
+        // swap in the IMPLIED (re-anchored) line numbers: the file may have
+        // drifted since the diagram was drawn, and the display should track it
+        const locEl = document.getElementById('refloc-' + msg.reqId + '-' + i);
+        if (locEl && res && res.ok) {
+          const implied = refLoc({ ranges: res.impliedRanges, line: res.impliedLine });
+          if (implied) {
+            const base = locEl.textContent.split(':')[0];
+            const drifted = locEl.textContent !== base + ':' + implied;
+            locEl.textContent = base + ':' + implied;
+            if (drifted) { locEl.title = 'moved — the diagram originally referenced other line numbers'; locEl.classList.add('drifted'); }
+          }
+          if (i === 0 && res.focusLine) {
+            const goBtn = document.querySelector('#detailActions button');
+            if (goBtn && /^Go to source/.test(goBtn.textContent)) { goBtn.textContent = 'Go to source :' + res.focusLine; }
+          }
+        }
       });
     }
   });

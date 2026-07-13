@@ -138,3 +138,4 @@ svg text { user-select: none; }
 .refHead .refRole { color: var(--vscode-charts-blue, #569cd6); margin-right: 2px; }
 .refHead:hover .refRole { color: inherit; }
 .refNote { font-size: 11.5px; line-height: 1.45; padding: 5px 8px 4px; opacity: .85; border-bottom: 1px solid var(--vscode-panel-border, #3c3c3c); }
+.refLoc.drifted { color: var(--vscode-charts-yellow, #dcdcaa); }
