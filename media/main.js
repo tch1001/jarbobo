@@ -264,7 +264,7 @@
           + '<span class="refLoc" id="refloc-' + reqId + '-' + i + '">' + escHtml(base + (loc ? ':' + loc : '')) + '</span>'
           + '<span class="refGo">↗</span>';
         head.title = 'Open ' + refDisplay(r);
-        head.onclick = () => openRef(r); // just THIS hop's highlight
+        head.onclick = () => openRef(r, refs); // jump to THIS ref, highlight the full set (like ctrl/cmd+click)
         div.appendChild(head);
         if (r.note) {
           const note = document.createElement('div');
@@ -276,6 +276,10 @@
         pre.className = 'refCode';
         pre.id = 'snip-' + reqId + '-' + i;
         pre.textContent = '…';
+        pre.title = 'Open ' + refDisplay(r);
+        // click the snippet → jump to THIS ref, highlight the FULL set (like ctrl/cmd+click).
+        // a drag (text selection) is not treated as a click.
+        pre.onclick = () => { if (String(getSelection())) { return; } openRef(r, refs); };
         div.appendChild(pre);
         refsBox.appendChild(div);
       });

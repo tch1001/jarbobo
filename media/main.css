@@ -114,6 +114,7 @@ svg text { user-select: none; }
   white-space: normal; overflow-x: hidden; margin: 0; padding: 6px 0;
   font-family: Menlo, Consolas, monospace; font-size: 11px; line-height: 1.45;
   background: var(--vscode-editor-background, #1e1e1e);
+  cursor: pointer;
 }
 #detail pre.refCode.err { padding: 6px 8px; opacity: .6; font-style: italic; white-space: pre-wrap; }
 .refLine { display: flex; }
