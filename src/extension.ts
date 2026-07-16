@@ -4,6 +4,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import {
+    JARBOBO_EXT, localDiagramsDir, readContainer, writeContainer, parseContainer,
+    serializeContainer, isContainerFile, stripMeta, type Container,
+} from './storage.js';
 
 const HOME = path.join(os.homedir(), '.jarbobo');
 const PORT_FILE = path.join(HOME, 'port.json');
@@ -50,6 +54,14 @@ export function activate(context: vscode.ExtensionContext) {
     statusItem.command = 'jarbobo.openRecent';
     context.subscriptions.push(statusItem);
     updateStatus();
+
+    // Opening a committed .jarbobo file renders it as an interactive diagram.
+    context.subscriptions.push(
+        vscode.window.registerCustomEditorProvider('jarbobo.diagram', new JarboboEditorProvider(context), {
+            webviewOptions: { retainContextWhenHidden: true },
+            supportsMultipleEditorsPerDocument: false,
+        }),
+    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand('jarbobo.openPanel', () => {
@@ -130,11 +142,19 @@ function registerMcpProvider(context: vscode.ExtensionContext) {
     const version = context.extension.packageJSON.version as string;
     context.subscriptions.push(
         vscode.lm.registerMcpServerDefinitionProvider('jarbobo.mcp-servers', {
-            provideMcpServerDefinitions: () => [
-                // process.execPath = the editor's own bundled Node — no dependency
-                // on the user having a compatible `node` on PATH.
-                new vscode.McpStdioServerDefinition('Jarbobo', process.execPath, [serverScript], {}, version),
-            ],
+            provideMcpServerDefinitions: () => {
+                // Tell the MCP server which workspace it's drawing for, so NEW
+                // diagrams are saved into <workspace>/.jarbobo/ (git-committable)
+                // rather than the global ~/.jarbobo. Recomputed per call so it
+                // tracks the currently-open folder.
+                const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                const env: Record<string, string> = ws ? { JARBOBO_WORKSPACE: ws } : {};
+                return [
+                    // process.execPath = the editor's own bundled Node — no dependency
+                    // on the user having a compatible `node` on PATH.
+                    new vscode.McpStdioServerDefinition('Jarbobo', process.execPath, [serverScript], env, version),
+                ];
+            },
         }),
     );
 }
@@ -423,8 +443,15 @@ async function onWebviewMessage(
         const file = diagram._file as string | undefined;
         if (file) {
             try {
-                const { _file, ...clean } = diagram;
-                fs.writeFileSync(file, JSON.stringify(clean, null, 2));
+                if (isContainerFile(file)) {
+                    // update just this version inside the local .jarbobo container
+                    const c = readContainer(file);
+                    const ver = Number(diagram._version) || c.versions.length;
+                    if (c.versions[ver - 1]) { c.versions[ver - 1] = stripMeta(diagram); }
+                    writeContainer(file, c);
+                } else {
+                    fs.writeFileSync(file, JSON.stringify(stripMeta(diagram), null, 2));
+                }
             } catch { /* best-effort */ }
         }
     } else if (msg.type === 'open' && msg.file) {
@@ -503,9 +530,14 @@ async function onWebviewMessage(
         const results = await Promise.all(msg.refs.map(readSnippet));
         panel.webview.postMessage({ type: 'snippets', reqId: msg.reqId, results });
     } else if (msg.type === 'loadVersion' && msg.id && typeof msg.version === 'number') {
-        // user picked a version in the panel's version dropdown
+        // user picked a version in the panel's version dropdown — read from
+        // wherever this diagram lives (local .jarbobo container or legacy lineage)
         try {
-            const d = loadLineageVersion(msg.id, msg.version);
+            const existing = panels.get(panel) as Record<string, unknown> | undefined;
+            const file = existing?._file as string | undefined;
+            const d = (file && isContainerFile(file))
+                ? containerPayload(file, msg.version)
+                : loadLineageVersion(msg.id, msg.version);
             panels.set(panel, d);
             panel.webview.postMessage({ type: 'render', diagram: d });
         } catch (e) {
@@ -611,10 +643,47 @@ function loadLineageVersion(id: string, version: number): Record<string, unknown
     return d;
 }
 
+// Build a render payload from a local .jarbobo container (a specific version,
+// default latest), tagging it with the meta the panel expects.
+function containerPayload(file: string, version?: number): Record<string, unknown> {
+    const c = readContainer(file);
+    const n = c.versions.length;
+    const v = version ?? n;
+    const d = { ...(c.versions[v - 1] ?? {}) } as Record<string, unknown>;
+    d._id = c.id || path.basename(file, JARBOBO_EXT);
+    d._version = v;
+    d._versions = c.versions.map((_, i) => i + 1);
+    d._file = file;
+    return d;
+}
+
 type HistoryEntry = { label: string; description: string; mtime: number; load: () => unknown };
 
 function historyEntries(): HistoryEntry[] {
     const entries: HistoryEntry[] = [];
+    // LOCAL containers from this workspace's .jarbobo/ (git-committable)
+    const localDir = localDiagramsDir();
+    if (localDir) {
+        let files: string[] = [];
+        try { files = fs.readdirSync(localDir).filter(f => f.endsWith(JARBOBO_EXT)); } catch { /* none */ }
+        for (const f of files) {
+            try {
+                const full = path.join(localDir, f);
+                const c = readContainer(full);
+                const n = c.versions.length;
+                if (!n) { continue; }
+                const latest = c.versions[n - 1] as { title?: string; type?: string };
+                const mtime = fs.statSync(full).mtimeMs;
+                entries.push({
+                    label: latest.title || c.id || f,
+                    description: `${latest.type} · v${n}${n > 1 ? ` (${n} versions)` : ''} · local · ${new Date(mtime).toLocaleString()}`,
+                    mtime,
+                    load: () => containerPayload(full),
+                });
+            } catch { /* skip unreadable */ }
+        }
+    }
+    // GLOBAL (legacy) diagrams
     let dirents: fs.Dirent[] = [];
     try {
         dirents = fs.readdirSync(DIAGRAMS_DIR, { withFileTypes: true });
@@ -675,6 +744,81 @@ async function openRecent() {
         } catch (e) {
             vscode.window.showErrorMessage(`Jarbobo: cannot load diagram: ${e}`);
         }
+    }
+}
+
+// ---------------------------------------------------------------- .jarbobo custom editor
+// Opening a committed .jarbobo file renders it as an interactive diagram (its
+// latest version), with the version picker, source jumps, and drag-to-rearrange
+// all working. Layout changes are written back INTO the document via a
+// WorkspaceEdit, so they dirty the tab and save through git like any edit.
+function containerPayloadFromText(text: string, file: string, version?: number): Record<string, unknown> {
+    const c = parseContainer(text);
+    const n = c.versions.length;
+    const v = version ?? n;
+    const d = { ...(c.versions[v - 1] ?? {}) } as Record<string, unknown>;
+    d._id = c.id || path.basename(file, JARBOBO_EXT);
+    d._version = v;
+    d._versions = c.versions.map((_, i) => i + 1);
+    d._file = file;
+    return d;
+}
+
+class JarboboEditorProvider implements vscode.CustomTextEditorProvider {
+    constructor(private readonly ctx: vscode.ExtensionContext) {}
+
+    resolveCustomTextEditor(document: vscode.TextDocument, webviewPanel: vscode.WebviewPanel): void {
+        const file = document.uri.fsPath;
+        webviewPanel.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, 'media')],
+        };
+        webviewPanel.webview.html = buildHtml(webviewPanel.webview);
+
+        let currentVersion: number | undefined; // which version is on screen
+        let selfEdit = false;                    // suppress re-render on our own writes
+
+        const render = (version?: number) => {
+            try {
+                const payload = containerPayloadFromText(document.getText(), file, version);
+                currentVersion = payload._version as number;
+                webviewPanel.webview.postMessage({ type: 'render', diagram: payload });
+            } catch (e) {
+                log(`custom editor: cannot render ${file}: ${e}`);
+            }
+        };
+
+        webviewPanel.webview.onDidReceiveMessage(async (msg) => {
+            if (!msg || typeof msg !== 'object') { return; }
+            if (msg.type === 'ready') { render(); return; }
+            if (msg.type === 'loadVersion' && typeof msg.version === 'number') { render(msg.version); return; }
+            if (msg.type === 'layout') {
+                selfEdit = true;
+                try {
+                    const c = parseContainer(document.getText());
+                    const v = currentVersion ?? c.versions.length;
+                    const target = c.versions[v - 1];
+                    if (target) {
+                        if (msg.positions) { target._layout = msg.positions; } else { delete target._layout; }
+                        c.versions[v - 1] = stripMeta(target);
+                        const edit = new vscode.WorkspaceEdit();
+                        const full = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+                        edit.replace(document.uri, full, serializeContainer(c));
+                        await vscode.workspace.applyEdit(edit);
+                    }
+                } catch (e) { log(`custom editor: layout persist failed: ${e}`); }
+                selfEdit = false;
+                return;
+            }
+            // open source / snippets / openUrl / navigate — stateless; reuse the panel handler
+            await onWebviewMessage(webviewPanel, msg);
+        });
+
+        // external changes (git checkout, MCP update, manual text edit, undo) → re-render
+        const changeSub = vscode.workspace.onDidChangeTextDocument((e) => {
+            if (e.document.uri.toString() === document.uri.toString() && !selfEdit) { render(currentVersion); }
+        });
+        webviewPanel.onDidDispose(() => changeSub.dispose());
     }
 }
 

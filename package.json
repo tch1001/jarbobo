@@ -18,9 +18,22 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCustomEditor:jarbobo.diagram"
   ],
   "contributes": {
+    "customEditors": [
+      {
+        "viewType": "jarbobo.diagram",
+        "displayName": "Jarbobo Diagram",
+        "selector": [
+          {
+            "filenamePattern": "*.jarbobo"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
     "commands": [
       {
         "command": "jarbobo.openPanel",

@@ -14,6 +14,9 @@ import { z } from 'zod';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import {
+    JARBOBO_EXT, localDiagramsDir, localFileForId, readContainer, writeContainer,
+} from './storage.js';
 
 const HOME = path.join(os.homedir(), '.jarbobo');
 const PORT_FILE = path.join(HOME, 'port.json');
@@ -88,13 +91,27 @@ function slugify(title: string): string {
     return `${s}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function lineageDir(id: string) {
-    return path.join(DIAGRAMS_DIR, id);
+// A diagram lives EITHER as a local single-file container (new default,
+// git-committable) OR as a legacy global versioned lineage (read for backward
+// compatibility). resolveStore() finds which, preferring local.
+type Store =
+    | { kind: 'container'; file: string }
+    | { kind: 'lineage'; dir: string };
+
+function resolveStore(id: string): Store | undefined {
+    const lf = localFileForId(id);
+    if (lf && fs.existsSync(lf)) { return { kind: 'container', file: lf }; }
+    const dir = path.join(DIAGRAMS_DIR, id);
+    if (fs.existsSync(dir)) { return { kind: 'lineage', dir }; }
+    return undefined;
 }
 
-function listVersions(id: string): number[] {
+function storeVersions(store: Store): number[] {
+    if (store.kind === 'container') {
+        return readContainer(store.file).versions.map((_, i) => i + 1);
+    }
     try {
-        return fs.readdirSync(lineageDir(id))
+        return fs.readdirSync(store.dir)
             .map((f) => /^v(\d+)\.json$/.exec(f)?.[1])
             .filter((v): v is string => !!v)
             .map(Number)
@@ -104,8 +121,27 @@ function listVersions(id: string): number[] {
     }
 }
 
+function storeRead(store: Store, version: number): Record<string, unknown> {
+    if (store.kind === 'container') {
+        return readContainer(store.file).versions[version - 1];
+    }
+    return JSON.parse(fs.readFileSync(path.join(store.dir, `v${version}.json`), 'utf8'));
+}
+
+function storeFile(store: Store, version: number): string {
+    return store.kind === 'container' ? store.file : path.join(store.dir, `v${version}.json`);
+}
+
+// id-based convenience wrappers (open_diagram / list_diagrams / withMeta)
+function listVersions(id: string): number[] {
+    const store = resolveStore(id);
+    return store ? storeVersions(store) : [];
+}
+
 function readVersion(id: string, version: number): Record<string, unknown> {
-    return JSON.parse(fs.readFileSync(path.join(lineageDir(id), `v${version}.json`), 'utf8'));
+    const store = resolveStore(id);
+    if (!store) { throw new Error(`no diagram with id "${id}"`); }
+    return storeRead(store, version);
 }
 
 // ---------------------------------------------------------------- delivery
@@ -129,8 +165,17 @@ async function postToPanel(payload: Record<string, unknown>): Promise<{ delivere
 
 function withMeta(diagram: Record<string, unknown>, id: string, version: number) {
     // _file lets the extension persist user rearrangements back into this
-    // version's JSON; _versions feeds the panel's version picker.
-    return { ...diagram, _id: id, _version: version, _versions: listVersions(id), _file: path.join(lineageDir(id), `v${version}.json`) };
+    // diagram's storage (the local .jarbobo container, or a legacy v<N>.json);
+    // _versions feeds the panel's version picker. Resolved from the store that
+    // was just written, so it points at wherever this diagram actually lives.
+    const store = resolveStore(id);
+    return {
+        ...diagram,
+        _id: id,
+        _version: version,
+        _versions: store ? storeVersions(store) : [version],
+        _file: store ? storeFile(store, version) : path.join(DIAGRAMS_DIR, id, `v${version}.json`),
+    };
 }
 
 // ---------------------------------------------------------------- layout carry
@@ -240,44 +285,67 @@ async function deliver(diagram: Record<string, unknown>, editId?: string, baseVe
     let id: string;
     let version: number;
     if (editId) {
-        const versions = listVersions(editId);
-        if (!versions.length) {
+        const store = resolveStore(editId);
+        if (!store) {
             throw new Error(`No diagram with id "${editId}". Call list_diagrams to see available ids, or omit id to create a new diagram.`);
         }
-        const latest = readVersion(editId, versions[versions.length - 1]);
+        const versions = storeVersions(store);
+        const latest = storeRead(store, versions[versions.length - 1]);
         if (latest.type !== diagram.type) {
             throw new Error(`Diagram "${editId}" is a ${latest.type} diagram; it cannot become a ${diagram.type}. Use the matching draw tool, or omit id to create a new diagram.`);
         }
         id = editId;
         version = versions[versions.length - 1] + 1;
-        // The user's hand-arranged positions (saved into the version file when
-        // they drag nodes) carry forward to the edit, keyed by element id —
-        // this is why edits must keep ids stable. Positions for ids that no
-        // longer exist are dropped; brand-new elements get placed by the
-        // renderer near their connected neighbors. baseVersion selects WHICH
-        // version's arrangement to inherit (default: the latest).
+        // The user's hand-arranged positions (saved into the version when they
+        // drag nodes) carry forward to the edit, keyed by element id — this is
+        // why edits must keep ids stable. Positions for ids that no longer
+        // exist are dropped; brand-new elements get placed by the renderer near
+        // their connected neighbors. baseVersion selects WHICH version's
+        // arrangement to inherit (default: the latest).
         if (baseVersion !== undefined && !versions.includes(baseVersion)) {
             throw new Error(`Diagram "${editId}" has no v${baseVersion} — available: ${versions.map(v => 'v' + v).join(', ')}.`);
         }
-        const layoutSource = baseVersion !== undefined ? readVersion(editId, baseVersion) : latest;
+        const layoutSource = baseVersion !== undefined ? storeRead(store, baseVersion) : latest;
         const carried = carryLayout(layoutSource._layout, diagram);
         if (carried) { diagram = { ...diagram, _layout: carried }; }
+        attachAnchors(diagram); // snapshot referenced line text for drift recovery
+        // append the new version to wherever this diagram already lives
+        if (store.kind === 'container') {
+            const c = readContainer(store.file);
+            c.versions.push(diagram);
+            writeContainer(store.file, c);
+        } else {
+            fs.mkdirSync(store.dir, { recursive: true });
+            fs.writeFileSync(path.join(store.dir, `v${version}.json`), JSON.stringify(diagram, null, 2));
+        }
     } else {
         id = slugify(String(diagram.title ?? 'diagram'));
         version = 1;
+        attachAnchors(diagram); // snapshot referenced line text for drift recovery
+        // NEW diagrams go LOCAL (git-committable) when a workspace is known,
+        // otherwise fall back to the global lineage for backward compatibility.
+        const lf = localFileForId(id);
+        if (lf) {
+            writeContainer(lf, { id, versions: [diagram] });
+        } else {
+            const dir = path.join(DIAGRAMS_DIR, id);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, `v${version}.json`), JSON.stringify(diagram, null, 2));
+        }
     }
-    attachAnchors(diagram); // snapshot referenced line text for drift recovery
-    fs.mkdirSync(lineageDir(id), { recursive: true });
-    const file = path.join(lineageDir(id), `v${version}.json`);
-    fs.writeFileSync(file, JSON.stringify(diagram, null, 2));
-    const { delivered, err } = await postToPanel(withMeta(diagram, id, version));
-    return { id, version, file, delivered, err };
+    const meta = withMeta(diagram, id, version);
+    const { delivered, err } = await postToPanel(meta);
+    return { id, version, file: meta._file as string, delivered, err };
 }
 
 function ok(kind: string, title: string, stats: string, d: Delivery) {
     let text: string;
     if (!d.delivered) {
-        text = `Could not reach the Jarbobo panel (${d.err || 'extension not running'}). The diagram was saved as "${d.id}" v${d.version}; ask the user to open Cursor with the Jarbobo extension enabled and run "Jarbobo: Open Recent Diagram".`;
+        const isLocal = d.file.endsWith(JARBOBO_EXT);
+        const openHint = isLocal
+            ? `Saved to ${d.file} — open that file in the editor (the Jarbobo extension renders .jarbobo files directly; no running panel needed). Tip: reload the editor window if the extension was just installed.`
+            : `Saved as "${d.id}" v${d.version}. Open Cursor with the Jarbobo extension enabled, then reload the window and run "Jarbobo: Open Recent Diagram".`;
+        text = `Diagram saved but the live Jarbobo panel wasn't reachable (${d.err || 'extension not running'}). ${openHint}`;
     } else if (d.version === 1) {
         text = `Rendered ${kind} "${title}" (${stats}) in a new Jarbobo tab. Diagram id: "${d.id}" (v1). To EDIT this diagram later — updating the same tab and saving as v2 — call this tool again with id: "${d.id}".`;
     } else {
@@ -637,17 +705,38 @@ server.registerTool(
     },
     async () => {
         const lines: string[] = [];
+        const seen = new Set<string>();
+        // LOCAL diagrams (this workspace's .jarbobo/*.jarbobo containers) first
+        const localDir = localDiagramsDir();
+        if (localDir) {
+            let files: string[] = [];
+            try { files = fs.readdirSync(localDir).filter((f) => f.endsWith(JARBOBO_EXT)); } catch { /* no local dir */ }
+            for (const f of files) {
+                try {
+                    const c = readContainer(path.join(localDir, f));
+                    const id = c.id || f.slice(0, -JARBOBO_EXT.length);
+                    const n = c.versions.length;
+                    if (!n) { continue; }
+                    seen.add(id);
+                    const latest = c.versions[n - 1];
+                    lines.push(`- id: "${id}" · ${latest.type} · "${latest.title}" · latest v${n} (${n} version${n > 1 ? 's' : ''}) · local`);
+                } catch { /* unreadable */ }
+            }
+        }
+        // GLOBAL (legacy) — skip ids already shown from the local workspace
         let entries: fs.Dirent[] = [];
         try {
             entries = fs.readdirSync(DIAGRAMS_DIR, { withFileTypes: true });
         } catch { /* empty dir */ }
         for (const e of entries) {
             if (e.isDirectory()) {
-                const versions = listVersions(e.name);
+                if (seen.has(e.name)) { continue; }
+                const store: Store = { kind: 'lineage', dir: path.join(DIAGRAMS_DIR, e.name) };
+                const versions = storeVersions(store);
                 if (!versions.length) { continue; }
                 try {
-                    const latest = readVersion(e.name, versions[versions.length - 1]);
-                    lines.push(`- id: "${e.name}" · ${latest.type} · "${latest.title}" · latest v${versions[versions.length - 1]} (${versions.length} version${versions.length > 1 ? 's' : ''})`);
+                    const latest = storeRead(store, versions[versions.length - 1]);
+                    lines.push(`- id: "${e.name}" · ${latest.type} · "${latest.title}" · latest v${versions[versions.length - 1]} (${versions.length} version${versions.length > 1 ? 's' : ''}) · global`);
                 } catch { /* unreadable */ }
             } else if (e.name.endsWith('.json')) {
                 try {
