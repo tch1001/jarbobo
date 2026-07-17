@@ -17,6 +17,7 @@ import * as path from 'path';
 import {
     JARBOBO_EXT, localDiagramsDir, localFileForId, readContainer, writeContainer,
 } from './storage.js';
+import { exportDiagram, suggestFilename, type Diagram, type ExportFormat } from './exporters.js';
 
 const HOME = path.join(os.homedir(), '.jarbobo');
 const PORT_FILE = path.join(HOME, 'port.json');
@@ -784,6 +785,70 @@ server.registerTool(
             content: [{
                 type: 'text' as const,
                 text: `${shown}\n\nSpec of "${id}" v${v} (resubmit via the matching draw tool with id "${id}" to make this the newest version):\n${JSON.stringify(spec)}`,
+            }],
+        };
+    },
+);
+
+// ---------------------------------------------------------------- export_diagram
+
+server.registerTool(
+    'export_diagram',
+    {
+        title: 'Export a diagram to a portable format',
+        description:
+            'Export a saved diagram to a portable text format and write it to a file. ' +
+            'Formats: "mermaid" (Mermaid flowchart/classDiagram/sequenceDiagram/timeline), "drawio" (diagrams.net, editable), "dot" (Graphviz), "tikz" (LaTeX/TikZ), "json" (raw spec). ' +
+            'Graph, class and swimlane diagrams convert faithfully; sequence and timeline convert best to "mermaid" (other formats approximate them). ' +
+            'The rendered image formats (SVG, PNG, and interactive HTML with clickable code refs) are exported from the Jarbobo panel itself — they need the live layout — via its Export button or the "Jarbobo: Export Diagram…" command. ' +
+            'Returns the path of the written file.',
+        inputSchema: {
+            id: z.string().describe('Diagram id, from a draw-tool result or list_diagrams.'),
+            format: z.enum(['mermaid', 'drawio', 'dot', 'tikz', 'json']).describe('Target text format.'),
+            version: z.number().int().optional().describe('Defaults to the latest version.'),
+            outPath: z.string().optional().describe('Where to write the file. Absolute, or relative to the server\'s working directory. Defaults to an "exports" folder beside the diagram\'s storage.'),
+        },
+    },
+    async ({ id, format, version, outPath }) => {
+        const store = resolveStore(id);
+        if (!store) { return fail([`no diagram with id "${id}" — call list_diagrams to see available ids`]); }
+        const versions = storeVersions(store);
+        const v = version ?? versions[versions.length - 1];
+        if (!versions.includes(v)) {
+            return fail([`diagram "${id}" has no v${v} — available: ${versions.map(x => 'v' + x).join(', ')}`]);
+        }
+        const spec = storeRead(store, v) as Diagram;
+        spec._id = id;
+        spec._version = v;
+        let result: { ext: string; content: string };
+        try {
+            result = exportDiagram(spec, format as ExportFormat);
+        } catch (e) {
+            return fail([String((e as Error).message)]);
+        }
+        // default output: an exports/ folder beside the diagram's own storage
+        const defaultDir = store.kind === 'container'
+            ? path.join(path.dirname(store.file), 'exports')
+            : path.join(DIAGRAMS_DIR, id, 'exports');
+        let target: string;
+        if (outPath) {
+            const resolved = path.isAbsolute(outPath) ? outPath : path.resolve(process.cwd(), outPath);
+            // treat a directory (existing or trailing-sep) as a folder, else a full path
+            const isDir = outPath.endsWith(path.sep) || (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory());
+            target = isDir ? path.join(resolved, suggestFilename(spec, result.ext)) : resolved;
+        } else {
+            target = path.join(defaultDir, suggestFilename(spec, result.ext));
+        }
+        try {
+            fs.mkdirSync(path.dirname(target), { recursive: true });
+            fs.writeFileSync(target, result.content);
+        } catch (e) {
+            return fail([`could not write ${target}: ${String((e as Error).message)}`]);
+        }
+        return {
+            content: [{
+                type: 'text' as const,
+                text: `Exported "${id}" v${v} as ${format} → ${target} (${result.content.length} bytes).`,
             }],
         };
     },

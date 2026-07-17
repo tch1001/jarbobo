@@ -55,6 +55,12 @@ Plus the viewer mechanics you'd expect from a real tool:
   histories, migration plans, roadmaps, incident timelines.
 - **`list_diagrams`** / **`open_diagram`** — enumerate saved diagrams and re-display any
   version of one (also returns its spec, so the LLM can roll back or build on it).
+- **`export_diagram`** — export a diagram to a portable file: **Mermaid**, **draw.io**
+  (diagrams.net, editable), **Graphviz DOT**, **LaTeX/TikZ**, or raw **JSON**. Rendered
+  **SVG**, **PNG**, and self-contained **interactive HTML** (clickable elements with
+  embedded, syntax-highlighted code snippets) are exported from the panel itself — via the
+  titlebar **export** button or the **“Jarbobo: Export Diagram…”** command — since they need
+  the live layout.
 
 **Edits are versioned.** Every draw call without an `id` creates a new diagram (new tab)
 and returns its id; passing the id back **edits** it — the content saves as the next

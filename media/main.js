@@ -437,6 +437,9 @@
 
   function bindSvgItem(el, item, label, kind) {
     if (!item) { return; }
+    // tag for the exporter (interactive HTML): maps this SVG element to its item
+    const exIdx = registerExportItem(item, label, kind);
+    if (exIdx >= 0) { el.setAttribute('data-jb', String(exIdx)); }
     el.addEventListener('mousemove', (e) => showItemTip(item, e.clientX, e.clientY, e.ctrlKey));
     // glow applies to node/edge-like elements only, not group containers
     const glows = kind !== 'lane' && kind !== 'track';
@@ -485,6 +488,10 @@
     // on the <svg>: CSS transforms rasterize the layer once and scale the bitmap
     // (fuzzy text); attribute transforms re-render vectors crisply at every scale.
     const natW = Number(svg.getAttribute('width')) || 0;
+    // stash the natural (content) size so the exporter can rebuild a fitted,
+    // un-panned copy of this SVG later (width/height get overwritten below)
+    svg.dataset.natw = String(natW);
+    svg.dataset.nath = String(Number(svg.getAttribute('height')) || 0);
     const vp = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     while (svg.firstChild) { vp.appendChild(svg.firstChild); }
     svg.appendChild(vp);
@@ -515,12 +522,291 @@
     };
   }
 
+  // ---------------------------------------------------------------- export
+  // Visual formats (SVG / PNG / interactive HTML) are produced HERE because they
+  // need the live rendered geometry. Text formats (mermaid/dot/tikz/drawio/json)
+  // are produced by the extension from the spec. The export button posts
+  // {type:'export'}; the extension shows a format picker and, for visual formats,
+  // asks us back via {type:'exportRender', format, reqId}; we reply with
+  // {type:'exportResult', reqId, ok, data, encoding, mime}.
+
+  let exportReg = [];              // index -> {item,label,kind}; drives data-jb tags
+  let exportReqCounter = 0;
+  const exportSnipPending = new Map();
+
+  function registerExportItem(item, label, kind) {
+    if (!item) { return -1; }
+    exportReg.push({ item, label: label || '', kind: kind || '' });
+    return exportReg.length - 1;
+  }
+
+  const escX = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  function clipToBox(c, toward, box) {
+    const dx = toward.x - c.x, dy = toward.y - c.y;
+    if (!dx && !dy) { return { x: c.x, y: c.y }; }
+    const hw = box.w / 2, hh = box.h / 2;
+    const sx = dx ? hw / Math.abs(dx) : Infinity;
+    const sy = dy ? hh / Math.abs(dy) : Infinity;
+    const s = Math.min(sx, sy);
+    return { x: c.x + dx * s, y: c.y + dy * s };
+  }
+
+  function arrowHeadSvg(x1, y1, x2, y2, color, type) {
+    const a = Math.atan2(y2 - y1, x2 - x1);
+    const L = 11, Wd = 5;
+    const ux = Math.cos(a), uy = Math.sin(a), px = -uy, py = ux;
+    const bx = x2 - L * ux, by = y2 - L * uy;
+    const ax1 = (bx + Wd * px).toFixed(1), ay1 = (by + Wd * py).toFixed(1);
+    const ax2 = (bx - Wd * px).toFixed(1), ay2 = (by - Wd * py).toFixed(1);
+    if (type === 'vee') {
+      return `<polyline points="${ax1},${ay1} ${x2.toFixed(1)},${y2.toFixed(1)} ${ax2},${ay2}" fill="none" stroke="${escX(color)}" stroke-width="1.8"/>`;
+    }
+    return `<polygon points="${x2.toFixed(1)},${y2.toFixed(1)} ${ax1},${ay1} ${ax2},${ay2}" fill="${escX(color)}"/>`;
+  }
+
+  function edgeLabelSvg(mx, my, text, color) {
+    const t = String(text);
+    const w = Math.max(12, t.length * 6.5) + 6, h = 16;
+    return `<rect x="${(mx - w / 2).toFixed(1)}" y="${(my - h / 2).toFixed(1)}" width="${w.toFixed(1)}" height="${h}" rx="3" fill="${escX(BG)}" fill-opacity="0.92" stroke="${escX(color)}" stroke-width="1"/>`
+      + `<text x="${mx.toFixed(1)}" y="${(my + 4).toFixed(1)}" text-anchor="middle" font-size="11" font-family="sans-serif" fill="${escX(FG)}">${escX(t)}</text>`;
+  }
+
+  function nodeShapeSvg(shape, cx, cy, w, h, color) {
+    const common = `fill="${escX(color)}" fill-opacity="0.18" stroke="${escX(color)}" stroke-width="1.5"`;
+    const x = cx - w / 2, y = cy - h / 2;
+    const pts = (arr) => arr.map((p) => p.map((n) => n.toFixed(1)).join(',')).join(' ');
+    switch (shape) {
+      case 'ellipse':
+        return `<ellipse cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" rx="${(w / 2).toFixed(1)}" ry="${(h / 2).toFixed(1)}" ${common}/>`;
+      case 'diamond':
+        return `<polygon points="${pts([[cx, y], [x + w, cy], [cx, y + h], [x, cy]])}" ${common}/>`;
+      case 'hexagon': {
+        const q = w / 4;
+        return `<polygon points="${pts([[x + q, y], [x + w - q, y], [x + w, cy], [x + w - q, y + h], [x + q, y + h], [x, cy]])}" ${common}/>`;
+      }
+      case 'barrel': // cylinder
+        return `<path d="M${x.toFixed(1)},${(y + 6).toFixed(1)} a${(w / 2).toFixed(1)},6 0 0 1 ${w.toFixed(1)},0 v${(h - 12).toFixed(1)} a${(w / 2).toFixed(1)},6 0 0 1 ${(-w).toFixed(1)},0 z" ${common}/>`
+          + `<path d="M${x.toFixed(1)},${(y + 6).toFixed(1)} a${(w / 2).toFixed(1)},6 0 0 0 ${w.toFixed(1)},0" fill="none" stroke="${escX(color)}" stroke-width="1.5"/>`;
+      case 'round-rectangle':
+      default:
+        return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="6" ${common}/>`;
+    }
+  }
+
+  function nodeLabelSvg(label, cx, cy) {
+    const lines = String(label == null ? '' : label).split('\n');
+    const lh = 15;
+    const startY = cy - (lines.length - 1) * lh / 2 + 4;
+    return lines.map((ln, i) => `<text x="${cx.toFixed(1)}" y="${(startY + i * lh).toFixed(1)}" text-anchor="middle" font-size="12" font-family="sans-serif" fill="${escX(FG)}">${escX(ln)}</text>`).join('');
+  }
+
+  // Synthesise an SVG for the cytoscape graph from its live node/edge geometry.
+  function buildGraphSvg() {
+    const cy = window.__cy;
+    if (!cy) { throw new Error('graph not ready'); }
+    exportReg = []; // the graph path doesn't use bindSvgItem — own the registry
+    const PAD = 30;
+    const bb = cy.elements().boundingBox();
+    const W = Math.max(1, Math.ceil(bb.w + PAD * 2));
+    const H = Math.max(1, Math.ceil(bb.h + PAD * 2));
+    const ox = PAD - bb.x1, oy = PAD - bb.y1;
+    const P = [`<rect x="0" y="0" width="${W}" height="${H}" fill="${escX(BG)}"/>`];
+    cy.nodes().forEach((n) => {
+      if (!n.isParent()) { return; }
+      const b = n.boundingBox();
+      const color = n.data('color') || MUTED;
+      P.push(`<rect x="${(b.x1 + ox).toFixed(1)}" y="${(b.y1 + oy).toFixed(1)}" width="${b.w.toFixed(1)}" height="${b.h.toFixed(1)}" rx="8" fill="${escX(color)}" fill-opacity="0.06" stroke="${escX(color)}" stroke-width="1" stroke-dasharray="4 3"/>`);
+      P.push(`<text x="${(b.x1 + ox + b.w / 2).toFixed(1)}" y="${(b.y1 + oy + 13).toFixed(1)}" text-anchor="middle" font-size="11" font-family="sans-serif" fill="${escX(FG)}">${escX(n.data('label'))}</text>`);
+    });
+    cy.edges().forEach((e) => {
+      const s = e.source().position(), t = e.target().position();
+      const p1 = clipToBox(s, t, e.source().boundingBox());
+      const p2 = clipToBox(t, s, e.target().boundingBox());
+      const color = e.data('color') || MUTED;
+      const ls = e.data('lstyle');
+      const dash = ls === 'dashed' ? ' stroke-dasharray="6 4"' : ls === 'dotted' ? ' stroke-dasharray="2 3"' : '';
+      const x1 = p1.x + ox, y1 = p1.y + oy, x2 = p2.x + ox, y2 = p2.y + oy;
+      const idx = registerExportItem(e.data('_item'), e.data('label') || '', 'edge');
+      let g = `<g${idx >= 0 ? ` data-jb="${idx}"` : ''}>`;
+      g += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${escX(color)}" stroke-width="1.8"${dash}/>`;
+      const arrow = e.data('arrow');
+      if (arrow && arrow !== 'none') { g += arrowHeadSvg(x1, y1, x2, y2, color, arrow); }
+      const lbl = e.data('label');
+      if (lbl) { g += edgeLabelSvg((x1 + x2) / 2, (y1 + y2) / 2, lbl, color); }
+      g += '</g>';
+      P.push(g);
+    });
+    cy.nodes().forEach((n) => {
+      if (n.isParent()) { return; }
+      const pos = n.position();
+      const w = n.width(), h = n.height();
+      const cx = pos.x + ox, cyy = pos.y + oy;
+      const idx = registerExportItem(n.data('_item'), n.data('label') || '', 'node');
+      let g = `<g${idx >= 0 ? ` data-jb="${idx}"` : ''}>`;
+      g += nodeShapeSvg(n.data('shape') || 'round-rectangle', cx, cyy, w, h, n.data('color') || ACCENT);
+      g += nodeLabelSvg(n.data('label'), cx, cyy);
+      g += '</g>';
+      P.push(g);
+    });
+    const str = '<?xml version="1.0" encoding="UTF-8"?>\n'
+      + `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${P.join('')}</svg>`;
+    return { str, W, H };
+  }
+
+  // SVG-native types (sequence/class/swimlane/timeline): rebuild a fitted,
+  // un-panned copy of the live SVG, with a background and its natural size.
+  function buildNativeSvg() {
+    const live = stage.querySelector('svg');
+    if (!live) { throw new Error('nothing to export yet'); }
+    const W = Number(live.dataset.natw) || 800, H = Number(live.dataset.nath) || 600;
+    const clone = live.cloneNode(true);
+    const vp = clone.querySelector('g');
+    if (vp) { vp.removeAttribute('transform'); }
+    clone.setAttribute('width', String(W));
+    clone.setAttribute('height', String(H));
+    clone.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.insertAdjacentHTML('afterbegin', `<rect x="0" y="0" width="${W}" height="${H}" fill="${escX(BG)}"/>`);
+    const str = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(clone);
+    return { str, W, H };
+  }
+
+  function buildExportSvg() {
+    if (!currentDiagram) { throw new Error('no diagram'); }
+    return currentDiagram.type === 'graph' ? buildGraphSvg() : buildNativeSvg();
+  }
+
+  async function buildExportPng(scale) {
+    scale = scale || 2;
+    const { str, W, H } = buildExportSvg();
+    const img = new Image();
+    const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(str);
+    await new Promise((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('could not rasterize SVG')); img.src = url; });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(W * scale));
+    canvas.height = Math.max(1, Math.round(H * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = BG; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/png');
+  }
+
+  // fetch code snippets via the extension (same round-trip the detail panel uses,
+  // but on a negative reqId so it never collides with the live panel's request)
+  function fetchExportSnippets(refs) {
+    return new Promise((resolve) => {
+      const reqId = -(++exportReqCounter);
+      exportSnipPending.set(reqId, resolve);
+      vscodeApi.postMessage({ type: 'snippets', reqId, refs });
+      setTimeout(() => { if (exportSnipPending.has(reqId)) { exportSnipPending.delete(reqId); resolve([]); } }, 8000);
+    });
+  }
+
+  function collectExportCss() {
+    let out = '';
+    for (let i = 0; i < document.styleSheets.length; i++) {
+      try {
+        const rules = document.styleSheets[i].cssRules;
+        for (let j = 0; j < rules.length; j++) { out += rules[j].cssText + '\n'; }
+      } catch (err) { /* cross-origin sheet — skip */ }
+    }
+    return out;
+  }
+
+  async function buildExportHtml(providedCss) {
+    const { str: svgStr } = buildExportSvg();
+    const wanted = [];
+    const allRefs = [];
+    exportReg.forEach((entry, idx) => {
+      const { item, label, kind } = entry;
+      const refs = getRefs(item);
+      if (!item.detail && !item.tooltip && !refs.length && !item.href) { return; }
+      const slots = refs.map((r) => { const slot = allRefs.length; allRefs.push(r); return { slot, r }; });
+      wanted.push({ idx, label, kind, detail: item.detail || '', tooltip: item.tooltip || '', href: item.href || '', slots });
+    });
+    const results = allRefs.length ? await fetchExportSnippets(allRefs) : [];
+    const ITEMS = {};
+    wanted.forEach((it) => {
+      const refsHtml = it.slots.map(({ slot, r }) => {
+        const pre = document.createElement('pre');
+        pre.className = 'refCode';
+        renderSnippet(pre, results[slot]);
+        const loc = refLoc(r);
+        const base = (r.file.split('/').pop() || r.file);
+        return `<div class="refItem"><div class="refHead">`
+          + (r.label ? `<span class="refRole">${escHtml(r.label)}</span>` : '')
+          + `<span class="refLoc">${escHtml(base + (loc ? ':' + loc : ''))}</span></div>`
+          + (r.note ? `<div class="refNote">${escHtml(r.note)}</div>` : '')
+          + pre.outerHTML + `</div>`;
+      }).join('');
+      ITEMS[it.idx] = { label: it.label, kind: it.kind, detail: it.detail, tooltip: it.tooltip, href: it.href, refsHtml };
+    });
+    const itemsJson = JSON.stringify(ITEMS).replace(/</g, '\\u003c');
+    return exportHtmlDoc(currentDiagram, svgStr, itemsJson, providedCss || collectExportCss());
+  }
+
+  function exportHtmlDoc(d, svgStr, itemsJson, css) {
+    const rootVars = ':root{--vscode-editor-background:#1e1e1e;--vscode-editor-foreground:#d4d4d4;--vscode-descriptionForeground:#9d9d9d;'
+      + "--vscode-font-family:-apple-system,'Segoe UI',sans-serif;--vscode-panel-border:#3c3c3c;--vscode-editorWidget-background:#252526;"
+      + '--vscode-editorHoverWidget-background:#252526;--vscode-editorHoverWidget-border:#454545;--vscode-button-background:#0e639c;--vscode-button-foreground:#fff;'
+      + '--vscode-charts-blue:#4e94ce;--vscode-charts-foreground:#d4d4d4;--vscode-charts-green:#89d185;--vscode-charts-orange:#d18616;--vscode-charts-purple:#b180d7;--vscode-charts-yellow:#cca700;}'
+      + '@media (prefers-color-scheme:light){:root{--vscode-editor-background:#fff;--vscode-editor-foreground:#1e1e1e;--vscode-descriptionForeground:#616161;--vscode-panel-border:#e0e0e0;--vscode-editorWidget-background:#f3f3f3;--vscode-editorHoverWidget-background:#f3f3f3;--vscode-editorHoverWidget-border:#c8c8c8;--vscode-charts-foreground:#1e1e1e;}}';
+    const layout = 'body{margin:0;font-family:var(--vscode-font-family);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);}'
+      + '#jbBar{padding:8px 14px;border-bottom:1px solid var(--vscode-panel-border);display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;}'
+      + '#jbBar h1{font-size:14px;margin:0;font-weight:600;}#jbBar .sub{color:var(--vscode-descriptionForeground);font-size:12px;}'
+      + '#jbWrap{display:flex;height:calc(100vh - 42px);}#jbSvgBox{flex:1;overflow:auto;padding:16px;}#jbSvgBox svg{max-width:none;height:auto;}'
+      + '#jbSvgBox [data-jb]{cursor:pointer;}#jbSvgBox [data-jb]:hover{filter:brightness(1.25);}'
+      + '#jbPanel{width:380px;max-width:45vw;border-left:1px solid var(--vscode-panel-border);overflow:auto;padding:14px 16px;background:var(--vscode-editorWidget-background);}'
+      + '#jbPanel[hidden]{display:none;}#jbPanel h2{font-size:15px;margin:.2em 0 .5em;}#jbClose{float:right;border:none;background:none;color:inherit;cursor:pointer;font-size:15px;}'
+      + '#jbPanel .kind{color:var(--vscode-descriptionForeground);font-size:11px;text-transform:uppercase;letter-spacing:.5px;}'
+      + '#jbPanel .jbDetail{white-space:pre-wrap;font-family:inherit;background:none;border:none;padding:0;margin:.4em 0;}#jbHint{color:var(--vscode-descriptionForeground);font-size:12px;padding:8px 0;}';
+    const script = 'const ITEMS=' + itemsJson + ';'
+      + 'function esc(s){var d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML;}'
+      + 'function showItem(idx){var it=ITEMS[idx];if(!it)return;var p=document.getElementById("jbPanel");var h="<button id=\\"jbClose\\">\\u2715</button>";'
+      + 'if(it.kind)h+="<div class=\\"kind\\">"+esc(it.kind)+"</div>";h+="<h2>"+esc(it.label)+"</h2>";'
+      + 'if(it.detail)h+="<pre class=\\"jbDetail\\">"+esc(it.detail)+"</pre>";else if(it.tooltip)h+="<pre class=\\"jbDetail\\">"+esc(it.tooltip)+"</pre>";'
+      + 'if(it.href)h+="<div><a href=\\""+esc(it.href)+"\\" target=\\"_blank\\" rel=\\"noopener\\">"+esc(it.href)+"</a></div>";'
+      + 'if(it.refsHtml)h+=it.refsHtml;else h+="<div id=\\"jbHint\\">No code references.</div>";'
+      + 'p.innerHTML=h;p.hidden=false;document.getElementById("jbClose").onclick=function(){p.hidden=true;};}'
+      + 'document.querySelectorAll("#jbSvgBox [data-jb]").forEach(function(el){var idx=el.getAttribute("data-jb");if(!ITEMS[idx])return;el.addEventListener("click",function(e){e.stopPropagation();showItem(idx);});});';
+    return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+      + `<title>${escX(d.title || 'Jarbobo diagram')}</title>`
+      + `<style>${rootVars}${css}${layout}</style></head><body>`
+      + `<div id="jbBar"><h1>${escX(d.title || 'Diagram')}</h1><span class="sub">${escX(d.subtitle || '')}${d.subtitle ? ' · ' : ''}exported from Jarbobo — click an element for its code</span></div>`
+      + `<div id="jbWrap"><div id="jbSvgBox">${svgStr}</div><aside id="jbPanel" hidden></aside></div>`
+      + `<script>${script}</script></body></html>`;
+  }
+
+  async function handleExportRender(msg) {
+    try {
+      let data, encoding = 'utf8', mime;
+      if (msg.format === 'svg') { data = buildExportSvg().str; mime = 'image/svg+xml'; }
+      else if (msg.format === 'png') { data = (await buildExportPng()).split(',')[1]; encoding = 'base64'; mime = 'image/png'; }
+      else if (msg.format === 'html') { data = await buildExportHtml(msg.css); mime = 'text/html'; }
+      else { throw new Error('unknown visual format: ' + msg.format); }
+      vscodeApi.postMessage({ type: 'exportResult', reqId: msg.reqId, ok: true, format: msg.format, data, encoding, mime });
+    } catch (err) {
+      vscodeApi.postMessage({ type: 'exportResult', reqId: msg.reqId, ok: false, format: msg.format, error: String((err && err.message) || err) });
+    }
+  }
+
+  const btnExport = $('#btnExport');
+  if (btnExport) { btnExport.addEventListener('click', () => vscodeApi.postMessage({ type: 'export' })); }
+
   // ---------------------------------------------------------------- dispatch
 
   window.addEventListener('message', (e) => {
     const msg = e.data;
     if (msg && msg.type === 'render' && msg.diagram) { render(msg.diagram); }
     else if (msg && msg.type === 'becameVisible') { repaintCanvas(); }
+    else if (msg && msg.type === 'exportRender') { handleExportRender(msg); }
+    else if (msg && msg.type === 'snippets' && exportSnipPending.has(msg.reqId)) {
+      const resolve = exportSnipPending.get(msg.reqId);
+      exportSnipPending.delete(msg.reqId);
+      resolve(msg.results || []);
+    }
     else if (msg && msg.type === 'snippets' && msg.reqId === snippetReq) {
       // code previews for the detail panel's reference list
       (msg.results || []).forEach((res, i) => {
@@ -561,6 +847,7 @@
   function render(d) {
     readTheme();
     hideTip(); closeDetail();
+    exportReg = []; // rebuilt as elements bind; indexes the exporter's data-jb tags
     currentDiagram = d;
     vscodeApi.setState({ diagram: d }); // survives window reloads (panel serializer)
     if (verSel) {
